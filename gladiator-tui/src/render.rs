@@ -6,80 +6,34 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
-/// Word-wrap text into visual lines, preserving newlines.
+/// Hard-wrap text into visual lines, preserving all whitespace including
+/// leading spaces, tabs, and multiple spaces. Newlines in the content produce
+/// line breaks. Each sub-line is hard-wrapped at the available width.
 /// `first_width` is the available width for the first visual line (after prefix).
 /// `cont_width` is the available width for all subsequent visual lines.
-/// Newlines in the content produce line breaks; each sub-line is word-wrapped.
 fn wrap_text(content: &str, first_width: usize, cont_width: usize) -> Vec<String> {
     let mut result: Vec<String> = Vec::new();
 
     for line in content.split('\n') {
-        if line.is_empty() || line.chars().all(char::is_whitespace) {
-            // Empty line from \n - preserve as blank visual line
+        let chars: Vec<char> = line.chars().collect();
+        if chars.is_empty() {
             result.push(String::new());
             continue;
         }
 
-        let mut current = String::new();
-        let mut current_len = 0usize;
-        let mut current_width = 0usize;
-
-        for word in line.split_whitespace() {
-            let word_len = word.chars().count();
-
-            if current.is_empty() {
-                // Starting a new visual line
-                current_width = if result.is_empty() {
-                    first_width
-                } else {
-                    cont_width
-                };
-
-                if word_len > current_width && current_width > 0 {
-                    // Word longer than available width - hard-wrap
-                    let chars: Vec<char> = word.chars().collect();
-                    let mut start = 0;
-                    while start < chars.len() {
-                        let w = if result.is_empty() { first_width } else { cont_width };
-                        let end = (start + w).min(chars.len());
-                        result.push(chars[start..end].iter().collect());
-                        start = end;
-                    }
-                    // current stays empty
-                } else {
-                    current = word.to_string();
-                    current_len = word_len;
-                }
-            } else if current_len + 1 + word_len > current_width {
-                // Word doesn't fit on current line - wrap
-                result.push(std::mem::take(&mut current));
-                current_len = 0;
-
-                if word_len > cont_width && cont_width > 0 {
-                    // Word too long for a full line - hard-wrap
-                    let chars: Vec<char> = word.chars().collect();
-                    let mut start = 0;
-                    while start < chars.len() {
-                        let end = (start + cont_width).min(chars.len());
-                        result.push(chars[start..end].iter().collect());
-                        start = end;
-                    }
-                } else {
-                    current = word.to_string();
-                    current_len = word_len;
-                    current_width = cont_width;
-                }
+        // Hard-wrap this line at the available width
+        let mut pos = 0usize;
+        while pos < chars.len() {
+            let width = if result.is_empty() && pos == 0 {
+                // Very first visual line gets first_width (after prefix)
+                first_width.max(1)
             } else {
-                // Word fits on current line
-                current.push(' ');
-                current.push_str(word);
-                current_len += 1 + word_len;
-            }
-        }
-
-        // Push remaining current (if non-empty)
-        if !current.is_empty() {
-            result.push(current);
+                cont_width.max(1)
+            };
+            let end = (pos + width).min(chars.len());
+            let chunk: String = chars[pos..end].iter().collect();
+            result.push(chunk);
+            pos = end;
         }
     }
 
@@ -160,11 +114,12 @@ impl Renderer {
         let messages = chat.messages();
         let visible_height = area.height as usize;
         let width = area.width as usize;
+        let h_offset = scroll.h_offset();
 
         // Build a flat list of visual lines by wrapping each message
         let mut all_visual_lines: Vec<Line> = Vec::new();
         for msg in messages {
-            let lines = self.message_to_visual_lines(msg, width);
+            let lines = self.message_to_visual_lines(msg, width, h_offset);
             all_visual_lines.extend(lines);
         }
 
@@ -188,7 +143,7 @@ impl Renderer {
         frame.render_widget(para, area);
     }
 
-    fn message_to_visual_lines(&self, msg: &AppMessage, width: usize) -> Vec<Line<'_>> {
+    fn message_to_visual_lines(&self, msg: &AppMessage, width: usize, h_offset: usize) -> Vec<Line<'_>> {
         let (prefix, prefix_color, text_color) = match msg.role {
             AppMessageRole::User => (">", self.theme.color_secondary(), self.theme.color_text()),
             AppMessageRole::Assistant => ("", self.theme.color_primary(), self.theme.color_text()),
@@ -204,6 +159,38 @@ impl Renderer {
             String::new()
         };
         let prefix_len = prefix_str.chars().count();
+
+        // Tool messages: no wrapping, preserve exact whitespace, apply h_offset
+        if msg.role == AppMessageRole::Tool {
+            let mut lines: Vec<Line> = Vec::new();
+            for (i, raw_line) in msg.content.split('\n').enumerate() {
+                let chars: Vec<char> = raw_line.chars().collect();
+                let avail = if i == 0 {
+                    width.saturating_sub(prefix_len).max(1)
+                } else {
+                    width.max(1)
+                };
+                let start = h_offset.min(chars.len());
+                let end = (start + avail).min(chars.len());
+                let text: String = chars[start..end].iter().collect();
+
+                let mut spans: Vec<Span> = Vec::new();
+                if i == 0 && !prefix_str.is_empty() {
+                    spans.push(Span::styled(prefix_str.clone(), Style::default().fg(prefix_color)));
+                }
+                spans.push(Span::styled(text, Style::default().fg(text_color)));
+                lines.push(Line::from(spans));
+            }
+            if lines.is_empty() {
+                lines.push(Line::from(vec![Span::styled(
+                    prefix_str,
+                    Style::default().fg(prefix_color),
+                )]));
+            }
+            return lines;
+        }
+
+        // Non-tool messages: hard-wrap preserving whitespace and newlines
         let first_line_width = width.saturating_sub(prefix_len).max(1);
         let cont_width = width.max(1);
 

@@ -132,6 +132,7 @@ use std::cell::Cell;
 #[derive(Debug)]
 pub struct ScrollState {
     offset: Cell<usize>,
+    h_offset: Cell<usize>,
     visible_height: Cell<usize>,
     total_lines: Cell<usize>,
     stick_to_bottom: Cell<bool>,
@@ -141,6 +142,7 @@ impl ScrollState {
     pub fn new() -> Self {
         Self {
             offset: Cell::new(0),
+            h_offset: Cell::new(0),
             visible_height: Cell::new(0),
             total_lines: Cell::new(0),
             stick_to_bottom: Cell::new(true),
@@ -149,6 +151,10 @@ impl ScrollState {
 
     pub fn offset(&self) -> usize {
         self.offset.get()
+    }
+
+    pub fn h_offset(&self) -> usize {
+        self.h_offset.get()
     }
 
     pub fn stick_to_bottom(&self) -> bool {
@@ -172,11 +178,12 @@ impl ScrollState {
             .saturating_sub(self.visible_height.get())
     }
 
-    /// If stick_to_bottom is true, snap offset to max_offset.
+    /// If stick_to_bottom is true, snap offset to max_offset and reset h_offset.
     /// Called by renderer after setting total_lines/visible_height.
     pub fn update_if_sticking(&self) {
         if self.stick_to_bottom.get() {
             self.offset.set(self.max_offset());
+            self.h_offset.set(0);
         }
     }
 
@@ -201,6 +208,18 @@ impl ScrollState {
         }
     }
 
+    pub fn scroll_left(&mut self) {
+        let cur = self.h_offset.get();
+        if cur > 0 {
+            self.h_offset.set(cur - 1);
+        }
+    }
+
+    pub fn scroll_right(&mut self) {
+        let cur = self.h_offset.get();
+        self.h_offset.set(cur + 1);
+    }
+
     pub fn scroll_page_up(&mut self) {
         self.stick_to_bottom.set(false);
         let cur = self.offset.get();
@@ -221,11 +240,13 @@ impl ScrollState {
 
     pub fn scroll_to_top(&mut self) {
         self.offset.set(0);
+        self.h_offset.set(0);
         self.stick_to_bottom.set(false);
     }
 
     pub fn scroll_to_bottom(&mut self) {
         self.stick_to_bottom.set(true);
+        self.h_offset.set(0);
         self.offset.set(self.max_offset());
     }
 }

@@ -216,6 +216,46 @@ fn scroll_state_page_up_down() {
     assert!(scroll.stick_to_bottom());
 }
 
+#[test]
+fn scroll_state_h_offset() {
+    let mut scroll = ScrollState::new();
+    assert_eq!(scroll.h_offset(), 0);
+    scroll.scroll_right();
+    assert_eq!(scroll.h_offset(), 1);
+    scroll.scroll_right();
+    assert_eq!(scroll.h_offset(), 2);
+    scroll.scroll_left();
+    assert_eq!(scroll.h_offset(), 1);
+    scroll.scroll_left();
+    assert_eq!(scroll.h_offset(), 0);
+    // Can't go below 0
+    scroll.scroll_left();
+    assert_eq!(scroll.h_offset(), 0);
+}
+
+#[test]
+fn scroll_state_h_offset_reset_on_stick() {
+    let mut scroll = ScrollState::new();
+    scroll.scroll_right();
+    scroll.scroll_right();
+    assert_eq!(scroll.h_offset(), 2);
+    // stick_to_bottom should reset h_offset
+    scroll.set_total_lines(100);
+    scroll.set_visible_height(20);
+    scroll.update_if_sticking();
+    assert_eq!(scroll.h_offset(), 0);
+}
+
+#[test]
+fn scroll_state_h_offset_reset_on_scroll_to_bottom() {
+    let mut scroll = ScrollState::new();
+    scroll.scroll_right();
+    scroll.scroll_right();
+    assert_eq!(scroll.h_offset(), 2);
+    scroll.scroll_to_bottom();
+    assert_eq!(scroll.h_offset(), 0);
+}
+
 // --- ChatState / AppMessage tests ---
 
 #[test]

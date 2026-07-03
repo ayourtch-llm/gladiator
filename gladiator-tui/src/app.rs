@@ -126,11 +126,19 @@ impl App {
                 None
             }
             KeyCode::Left => {
-                self.input.cursor_left();
+                if key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
+                    self.scroll.scroll_left();
+                } else {
+                    self.input.cursor_left();
+                }
                 None
             }
             KeyCode::Right => {
-                self.input.cursor_right();
+                if key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
+                    self.scroll.scroll_right();
+                } else {
+                    self.input.cursor_right();
+                }
                 None
             }
             KeyCode::Char(ch) => {
