@@ -1,0 +1,211 @@
+use crate::tool::Tool;
+use gladiator_core::McpServerConfig;
+use rmcp::{
+    model::{CallToolRequestParams, RawContent, Tool as RmcpTool},
+    service::RunningService,
+    transport::TokioChildProcess,
+    ClientHandler, RoleClient,
+};
+use std::process::Stdio;
+use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::sync::Mutex;
+use tracing::{info, warn};
+
+/// A single MCP tool wrapped as a gladiator Tool.
+pub struct McpTool {
+    tool_name: String,
+    tool_description: String,
+    tool_parameters: serde_json::Value,
+    peer: Arc<Mutex<rmcp::Peer<RoleClient>>>,
+}
+
+impl McpTool {
+    pub fn new(tool: &RmcpTool, peer: Arc<Mutex<rmcp::Peer<RoleClient>>>) -> Self {
+        Self {
+            tool_name: tool.name.as_ref().to_string(),
+            tool_description: tool
+                .description
+                .as_ref()
+                .map(|s| s.as_ref().to_string())
+                .unwrap_or_default(),
+            tool_parameters: tool_input_schema_to_json(&tool.input_schema),
+            peer,
+        }
+    }
+}
+
+fn tool_input_schema_to_json(
+    schema: &Arc<serde_json::Map<String, serde_json::Value>>,
+) -> serde_json::Value {
+    serde_json::Value::Object(schema.as_ref().clone())
+}
+
+#[async_trait::async_trait]
+impl Tool for McpTool {
+    fn name(&self) -> &str {
+        &self.tool_name
+    }
+
+    fn description(&self) -> &str {
+        &self.tool_description
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        self.tool_parameters.clone()
+    }
+
+    async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
+        let peer = self.peer.lock().await;
+        let args_map: serde_json::Map<String, serde_json::Value> = if let serde_json::Value::Object(m) = arguments {
+            m.clone()
+        } else {
+            serde_json::Map::new()
+        };
+        let call_params = CallToolRequestParams {
+            name: self.tool_name.clone().into(),
+            arguments: Some(args_map),
+            meta: None,
+            task: None,
+        };
+
+        match peer.call_tool(call_params).await {
+            Ok(result) => {
+                let content = result
+                    .content
+                    .iter()
+                    .filter_map(|c| match &c.raw {
+                        RawContent::Text(t) => Some(t.text.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                let is_error = result.is_error.unwrap_or(false);
+                if is_error {
+                    Err(format!("MCP error: {}", content))
+                } else {
+                    Ok(content)
+                }
+            }
+            Err(e) => Err(format!("MCP call failed: {}", e)),
+        }
+    }
+}
+
+/// Empty handler for MCP client messages.
+#[derive(Clone)]
+pub struct McpClientHandler;
+impl ClientHandler for McpClientHandler {}
+
+/// Lightweight handle returned after spawning an MCP server.
+pub struct McpServerHandle {
+    prefix: String,
+    peer: Arc<Mutex<rmcp::Peer<RoleClient>>>,
+    tools: Vec<RmcpTool>,
+    config: McpServerConfig,
+}
+
+impl McpServerHandle {
+    /// Get tool actors for tools that should be exposed to the LLM.
+    pub fn tool_actors(&self) -> Vec<Arc<dyn Tool>> {
+        self.tools
+            .iter()
+            .filter(|t| {
+                let should_include = |name: &str| -> bool {
+                    if self.config.default {
+                        return true;
+                    }
+                    if !self.config.expose.is_empty() {
+                        return self.config.expose.contains(&name.to_string());
+                    }
+                    false
+                };
+                should_include(t.name.as_ref())
+            })
+            .map(|t| {
+                Arc::new(McpTool::new(t, self.peer.clone())) as Arc<dyn Tool>
+            })
+            .collect()
+    }
+
+    pub fn tool_names(&self) -> Vec<String> {
+        self.tools.iter().map(|t| t.name.as_ref().to_string()).collect()
+    }
+
+    pub fn prefix(&self) -> &str {
+        &self.prefix
+    }
+}
+
+/// Runner to spawn an MCP server process and discover its tools.
+pub struct McpServerRunner {
+    prefix: String,
+    config: McpServerConfig,
+}
+
+impl McpServerRunner {
+    pub fn new(prefix: String, config: McpServerConfig) -> Self {
+        Self { prefix, config }
+    }
+
+    pub async fn spawn(
+        &self,
+    ) -> Result<McpServerHandle, Box<dyn std::error::Error + Send + Sync>> {
+        if self.config.command.is_empty() {
+            return Err("MCP server command is empty".into());
+        }
+
+        let cmd = {
+            let mut c = tokio::process::Command::new(&self.config.command[0]);
+            c.args(&self.config.command[1..]);
+            c
+        };
+        let (transport, stderr) = TokioChildProcess::builder(cmd)
+            .stderr(Stdio::piped())
+            .spawn()?;
+
+        if let Some(stderr_handle) = stderr {
+            let prefix = self.prefix.clone();
+            tokio::spawn(async move {
+                let reader = BufReader::new(stderr_handle);
+                let mut lines_stream = reader.lines();
+                while let Ok(Some(text)) = lines_stream.next_line().await {
+                    if text.contains("ERROR") || text.contains("error") {
+                        warn!("[mcp:{}:stderr] {}", prefix, text);
+                    } else {
+                        info!("[mcp:{}:stderr] {}", prefix, text);
+                    }
+                }
+            });
+        }
+
+        let service = McpClientHandler;
+        let running_service: RunningService<RoleClient, McpClientHandler> =
+            rmcp::serve_client(service, transport).await?;
+        let peer = Arc::new(Mutex::new(running_service.peer().clone()));
+
+        info!("MCP server '{}' started, discovering tools...", self.prefix);
+
+        let tools: Vec<RmcpTool> = peer.lock().await.list_all_tools().await?;
+
+        info!(
+            "MCP server '{}' exposed {} tools",
+            self.prefix,
+            tools.len()
+        );
+
+        // Keep the service loop alive in background
+        let service_handle = tokio::spawn(async move {
+            let _ = running_service.waiting().await;
+        });
+        std::mem::forget(service_handle);
+
+        Ok(McpServerHandle {
+            prefix: self.prefix.clone(),
+            peer,
+            tools,
+            config: self.config.clone(),
+        })
+    }
+}
