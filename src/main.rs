@@ -40,6 +40,10 @@ async fn setup_topics(bus: &Bus, config: &Config) {
     bus.create_topic(&topics.user_control, 1000).await;
     bus.create_topic(&topics.ui_user, 1000).await;
     bus.create_topic(&topics.ui_input, 1000).await;
+    bus.create_topic(&topics.agent_state_control, 1000).await;
+    bus.create_topic(&topics.agent_state, 1000).await;
+    bus.create_topic(&topics.persistence_command, 1000).await;
+    bus.create_topic(&topics.persistence_response, 1000).await;
 }
 
 async fn spawn_mcp_servers(
@@ -175,9 +179,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         config.topics.agent_stream.clone(),
         config.agent.clone(),
     )
-    .with_tool_defs(registry.syntaxes().iter().map(|s| s.to_openai_json()).collect());
+    .with_tool_defs(registry.syntaxes().iter().map(|s| s.to_openai_json()).collect())
+    .with_state_topics(config.topics.agent_state_control.clone(), config.topics.agent_state.clone());
 
     let agent_handle = bus.spawn_actor(agent_actor).await?;
+
+    // Create and spawn Persistence actor
+    let persistence_actor = gladiator_agent::PersistenceActor::new(
+        0,
+        config.topics.persistence_command.clone(),
+        config.topics.persistence_response.clone(),
+        config.topics.agent_state_control.clone(),
+        config.topics.agent_state.clone(),
+    );
+    let persistence_handle = bus.spawn_actor(persistence_actor).await?;
 
     // Spawn tool runners
     let mut tool_runner_handles = Vec::new();
@@ -207,8 +222,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Register the agent input topic subscriber so the TUI can publish to it
     bus.register_announcement(gladiator_core::ActorAnnouncement {
         id: "gladiator-tui".to_string(),
-        subscriptions: vec![config.topics.agent_stream.clone()],
-        publications: vec![config.topics.agent_in.clone(), config.topics.user_control.clone()],
+        subscriptions: vec![config.topics.agent_stream.clone(), config.topics.persistence_response.clone()],
+        publications: vec![config.topics.agent_in.clone(), config.topics.user_control.clone(), config.topics.persistence_command.clone()],
     })
     .await;
 
@@ -245,6 +260,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing::info!("Shutting down...");
     llm_handle.stop().await;
     agent_handle.stop().await;
+    persistence_handle.stop().await;
     for handle in tool_runner_handles {
         handle.abort();
     }

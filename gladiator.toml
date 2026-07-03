@@ -16,6 +16,10 @@ tool_results = "tool:results"
 user_control = "user:control"
 ui_user = "ui:user"
 ui_input = "ui:input"
+agent_state_control = "agent:state_control"
+agent_state = "agent:state"
+persistence_command = "persistence:command"
+persistence_response = "persistence:response"
 
 [server]
 host = "127.0.0.1"

@@ -211,3 +211,83 @@ fn merge_user_message_multiple_merges() {
     assert_eq!(state.messages.len(), 1);
     assert_eq!(state.messages[0]["content"], "first\nsecond\nthird");
 }
+
+// =========================================================================
+// ConversationState serialization tests
+// =========================================================================
+
+#[test]
+fn conversation_state_serialize_roundtrip() {
+    let mut state = ConversationState::new();
+    state.add_user_message("Hello");
+    state.add_assistant_message("Hi there");
+    state.add_tool_result("call-1", "bash", "output", true);
+    state.increment_iteration();
+    state.was_interrupted = true;
+
+    let json = serde_json::to_value(&state).unwrap();
+    let deserialized: ConversationState = serde_json::from_value(json).unwrap();
+
+    assert_eq!(deserialized.messages.len(), state.messages.len());
+    assert_eq!(deserialized.iteration_count, state.iteration_count);
+    assert_eq!(deserialized.was_interrupted, state.was_interrupted);
+}
+
+#[test]
+fn conversation_state_serialize_has_expected_fields() {
+    let mut state = ConversationState::new();
+    state.add_user_message("test");
+    state.increment_iteration();
+
+    let json = serde_json::to_value(&state).unwrap();
+    assert!(json.get("messages").is_some());
+    assert!(json.get("iteration_count").is_some());
+    assert!(json.get("pending_tool_calls").is_some());
+    assert!(json.get("pending_messages").is_some());
+    assert!(json.get("was_interrupted").is_some());
+}
+
+#[test]
+fn conversation_state_serialize_empty() {
+    let state = ConversationState::new();
+    let json_str = serde_json::to_string(&state).unwrap();
+    let deserialized: ConversationState = serde_json::from_str(&json_str).unwrap();
+    assert!(deserialized.messages.is_empty());
+    assert_eq!(deserialized.iteration_count, 0);
+    assert!(!deserialized.was_interrupted);
+}
+
+// =========================================================================
+// PersistenceActor tests
+// =========================================================================
+
+#[tokio::test]
+async fn persistence_actor_announce() {
+    let actor = gladiator_agent::PersistenceActor::new(
+        0,
+        "persistence:command".to_string(),
+        "persistence:response".to_string(),
+        "agent:state_control".to_string(),
+        "agent:state".to_string(),
+    );
+    let ann = actor.announce();
+    assert_eq!(ann.id, "gladiator-persistence-0");
+    assert!(ann.subscriptions.contains(&"persistence:command".to_string()));
+    assert!(ann.subscriptions.contains(&"agent:state".to_string()));
+    assert!(ann.publications.contains(&"persistence:response".to_string()));
+    assert!(ann.publications.contains(&"agent:state_control".to_string()));
+}
+
+#[tokio::test]
+async fn persistence_actor_multiple_instances() {
+    let actor0 = gladiator_agent::PersistenceActor::new(
+        0, "persistence:command".to_string(), "persistence:response".to_string(),
+        "agent:state_control".to_string(), "agent:state".to_string(),
+    );
+    let actor1 = gladiator_agent::PersistenceActor::new(
+        1, "persistence:command".to_string(), "persistence:response".to_string(),
+        "agent:state_control".to_string(), "agent:state".to_string(),
+    );
+    assert_eq!(actor0.announce().id, "gladiator-persistence-0");
+    assert_eq!(actor1.announce().id, "gladiator-persistence-1");
+}

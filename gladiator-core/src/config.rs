@@ -84,6 +84,14 @@ pub struct TopicsConfig {
     pub ui_user: String,
     #[serde(default = "default_ui_input_topic")]
     pub ui_input: String,
+    #[serde(default = "default_agent_state_control_topic")]
+    pub agent_state_control: String,
+    #[serde(default = "default_agent_state_topic")]
+    pub agent_state: String,
+    #[serde(default = "default_persistence_command_topic")]
+    pub persistence_command: String,
+    #[serde(default = "default_persistence_response_topic")]
+    pub persistence_response: String,
 }
 
 impl Default for TopicsConfig {
@@ -103,6 +111,10 @@ impl Default for TopicsConfig {
             user_control: default_user_control_topic(),
             ui_user: default_ui_user_topic(),
             ui_input: default_ui_input_topic(),
+            agent_state_control: default_agent_state_control_topic(),
+            agent_state: default_agent_state_topic(),
+            persistence_command: default_persistence_command_topic(),
+            persistence_response: default_persistence_response_topic(),
         }
     }
 }
@@ -148,6 +160,18 @@ fn default_ui_user_topic() -> String {
 }
 fn default_ui_input_topic() -> String {
     "ui:input".to_string()
+}
+fn default_agent_state_control_topic() -> String {
+    "agent:state_control".to_string()
+}
+fn default_agent_state_topic() -> String {
+    "agent:state".to_string()
+}
+fn default_persistence_command_topic() -> String {
+    "persistence:command".to_string()
+}
+fn default_persistence_response_topic() -> String {
+    "persistence:response".to_string()
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

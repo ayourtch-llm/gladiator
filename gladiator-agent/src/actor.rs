@@ -20,6 +20,8 @@ pub struct AgentActor {
     pub system_message: String,
     pub tool_defs: Vec<serde_json::Value>,
     pub tool_timeout_secs: u64,
+    pub state_control_topic: String,
+    pub state_topic: String,
 }
 
 impl AgentActor {
@@ -48,6 +50,8 @@ impl AgentActor {
             config,
             tool_defs: Vec::new(),
             tool_timeout_secs: 300,
+            state_control_topic: String::new(),
+            state_topic: String::new(),
         }
     }
 
@@ -68,6 +72,12 @@ impl AgentActor {
 
     pub fn with_tool_timeout_secs(mut self, secs: u64) -> Self {
         self.tool_timeout_secs = secs;
+        self
+    }
+
+    pub fn with_state_topics(mut self, control: String, state: String) -> Self {
+        self.state_control_topic = control;
+        self.state_topic = state;
         self
     }
 
@@ -120,16 +130,24 @@ impl Actor for AgentActor {
     }
 
     fn announce(&self) -> ActorAnnouncement {
+        let mut subs = vec![
+            self.input_topic.clone(),
+            self.llm_out_topic.clone(),
+            self.llm_stream_topic.clone(),
+            self.llm_tool_calls_topic.clone(),
+            self.tool_results_topic.clone(),
+        ];
+        let mut pubs = vec![self.stream_output_topic.clone(), self.llm_in_topic.clone()];
+        if !self.state_control_topic.is_empty() {
+            subs.push(self.state_control_topic.clone());
+        }
+        if !self.state_topic.is_empty() {
+            pubs.push(self.state_topic.clone());
+        }
         ActorAnnouncement {
             id: self.id(),
-            subscriptions: vec![
-                self.input_topic.clone(),
-                self.llm_out_topic.clone(),
-                self.llm_stream_topic.clone(),
-                self.llm_tool_calls_topic.clone(),
-                self.tool_results_topic.clone(),
-            ],
-            publications: vec![self.stream_output_topic.clone(), self.llm_in_topic.clone()],
+            subscriptions: subs,
+            publications: pubs,
         }
     }
 
@@ -142,6 +160,13 @@ impl Actor for AgentActor {
         let mut stream_rx = bus.subscribe(&self.id(), &self.llm_stream_topic).await?;
         let mut tool_calls_rx = bus.subscribe(&self.id(), &self.llm_tool_calls_topic).await?;
         let mut tool_results_rx = bus.subscribe(&self.id(), &self.tool_results_topic).await?;
+
+        let mut state_control_rx: Option<tokio::sync::broadcast::Receiver<gladiator_core::Message>> =
+            if !self.state_control_topic.is_empty() {
+                Some(bus.subscribe(&self.id(), &self.state_control_topic).await?)
+            } else {
+                None
+            };
 
         let mut tool_watchdog = tokio::time::interval(std::time::Duration::from_secs(10));
 
@@ -359,6 +384,73 @@ impl Actor for AgentActor {
                             }
                         }
                         Err(RecvError::Lagged(n)) => warn!("Agent {} tool_results lagged: {}", self.index, n),
+                        Err(RecvError::Closed) => break,
+                    }
+                }
+                result = async {
+                    match &mut state_control_rx {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    match result {
+                        Ok(msg) => {
+                            let cmd_agent_id = msg.payload.get("agent_id").and_then(|v| v.as_str()).unwrap_or("");
+                            if cmd_agent_id != self.id() {
+                                continue;
+                            }
+                            let cmd_type = msg.payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                            match cmd_type {
+                                "dump_state" => {
+                                    let state_json = {
+                                        let s = state.lock().await;
+                                        serde_json::to_value(&*s)
+                                    };
+                                    match state_json {
+                                        Ok(json) => {
+                                            if !self.state_topic.is_empty() {
+                                                let msg = Message::new(
+                                                    &self.state_topic,
+                                                    &self.id(),
+                                                    serde_json::json!({"agent_id": self.id(), "state": json}),
+                                                );
+                                                let _ = bus.publish(&self.id(), msg).await;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            error!("Agent {}: failed to serialize state: {}", self.index, e);
+                                        }
+                                    }
+                                }
+                                "load_state" => {
+                                    let state_json = msg.payload.get("state").cloned().unwrap_or(serde_json::Value::Null);
+                                    match serde_json::from_value::<ConversationState>(state_json) {
+                                        Ok(new_state) => {
+                                            {
+                                                let mut s = state.lock().await;
+                                                *s = new_state;
+                                            }
+                                            let info_msg = Message::new(
+                                                &self.stream_output_topic,
+                                                &self.id(),
+                                                "State loaded successfully",
+                                            ).with_type("Info");
+                                            let _ = bus.publish(&self.id(), info_msg).await;
+                                        }
+                                        Err(e) => {
+                                            let err_msg = Message::new(
+                                                &self.stream_output_topic,
+                                                &self.id(),
+                                                format!("Failed to load state: {}", e),
+                                            ).with_type("Error");
+                                            let _ = bus.publish(&self.id(), err_msg).await;
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        Err(RecvError::Lagged(_)) => {}
                         Err(RecvError::Closed) => break,
                     }
                 }

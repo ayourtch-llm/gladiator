@@ -1,6 +1,7 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ConversationState {
     pub messages: Vec<serde_json::Value>,
     pub iteration_count: u32,

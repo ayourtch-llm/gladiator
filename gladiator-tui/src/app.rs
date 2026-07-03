@@ -1,3 +1,4 @@
+use crate::commands::{parse_tui_command, TuiCommand};
 use crate::event::bus_to_app_message;
 use crate::state::{AppMessage, ChatState, InputState, ScrollState};
 use crate::theme::Theme;
@@ -293,6 +294,7 @@ pub async fn run_app(
         topics.agent_stream.clone(),
         topics.llm_tool_calls.clone(),
         topics.llm_stats.clone(),
+        topics.persistence_response.clone(),
     ];
 
     let mut rx_handles = Vec::new();
@@ -384,7 +386,32 @@ pub async fn run_app(
                             }
                         } else {
                             if let Some(text) = app.handle_key(key) {
-                                let _ = user_input_tx.send(text);
+                                if let Some(cmd) = parse_tui_command(&text) {
+                                    match cmd {
+                                        TuiCommand::Save(filename) => {
+                                            let msg = Message::new(
+                                                &topics.persistence_command,
+                                                "gladiator-tui",
+                                                serde_json::json!({"action": "save", "filename": filename, "agent_id": "gladiator-agent-0"}),
+                                            );
+                                            let _ = bus.publish("gladiator-tui", msg).await;
+                                            app.chat_mut().add_message(AppMessage::system(&format!("Saving to {}...", filename)));
+                                            app.scroll_mut().scroll_to_bottom();
+                                        }
+                                        TuiCommand::Load(filename) => {
+                                            let msg = Message::new(
+                                                &topics.persistence_command,
+                                                "gladiator-tui",
+                                                serde_json::json!({"action": "load", "filename": filename, "agent_id": "gladiator-agent-0"}),
+                                            );
+                                            let _ = bus.publish("gladiator-tui", msg).await;
+                                            app.chat_mut().add_message(AppMessage::system(&format!("Loading from {}...", filename)));
+                                            app.scroll_mut().scroll_to_bottom();
+                                        }
+                                    }
+                                } else {
+                                    let _ = user_input_tx.send(text);
+                                }
                             }
                         }
                     }

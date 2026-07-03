@@ -49,6 +49,15 @@ pub fn bus_to_app_message(msg: &Message) -> Option<AppMessage> {
                 content,
             }),
             "Info" => Some(AppMessage::info(content)),
+            "PersistenceResponse" => {
+                let success = msg.payload.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+                let message = msg.payload.get("message").and_then(|v| v.as_str()).unwrap_or("Unknown response").to_string();
+                if success {
+                    Some(AppMessage::system(message))
+                } else {
+                    Some(AppMessage::error(message))
+                }
+            }
             "Log" => Some(AppMessage::system(content)),
             "Interrupt" => Some(AppMessage::system(format!(
                 "[interrupt] {}",
