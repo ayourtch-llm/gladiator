@@ -7,8 +7,12 @@ use gladiator_core::config::TopicsConfig;
 use gladiator_core::message::Message;
 use std::io;
 use std::time::Duration;
-use crossterm::event::{self, Event as CrosstermEvent, KeyCode, KeyEvent};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event as CrosstermEvent, KeyCode, KeyEvent,
+};
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
 use crossterm::execute;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -311,6 +315,7 @@ pub async fn run_app(
     enable_raw_mode().ok();
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen).ok();
+    execute!(stdout, EnableBracketedPaste).ok();
 
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend).ok();
@@ -346,11 +351,21 @@ pub async fn run_app(
             }
         }
 
-        // Check for key events (non-blocking with timeout)
+        // Check for key/paste events (non-blocking with timeout)
         if event::poll(tick).unwrap_or(false) {
-            if let Ok(CrosstermEvent::Key(key)) = event::read() {
-                if let Some(text) = app.handle_key(key) {
-                    let _ = user_input_tx.send(text);
+            if let Ok(ev) = event::read() {
+                match ev {
+                    CrosstermEvent::Key(key) => {
+                        if let Some(text) = app.handle_key(key) {
+                            let _ = user_input_tx.send(text);
+                        }
+                    }
+                    CrosstermEvent::Paste(data) => {
+                        // Normalize line endings: \r\n → \n, \r → \n
+                        let normalized = data.replace("\r\n", "\n").replace("\r", "\n");
+                        app.input_mut().insert_str(&normalized);
+                    }
+                    _ => {}
                 }
             }
         }
@@ -363,6 +378,7 @@ pub async fn run_app(
     }
 
     // Cleanup terminal
+    execute!(io::stdout(), DisableBracketedPaste).ok();
     disable_raw_mode().ok();
     execute!(io::stdout(), LeaveAlternateScreen).ok();
 

@@ -278,6 +278,58 @@ fn input_state_history_reset_on_submit() {
     assert_eq!(input.buffer(), "cmd2"); // the one we just submitted
 }
 
+// --- Paste tests ---
+
+#[test]
+fn input_state_insert_str_single_line() {
+    let mut input = InputState::new();
+    input.insert_str("hello world");
+    assert_eq!(input.buffer(), "hello world");
+    assert_eq!(input.cursor(), 11);
+}
+
+#[test]
+fn input_state_insert_str_multi_line_paste() {
+    let mut input = InputState::new();
+    // Simulate pasting "line1\nline2\nline3"
+    input.insert_str("line1\nline2\nline3");
+    assert_eq!(input.buffer(), "line1\nline2\nline3");
+    assert_eq!(input.cursor(), 17); // 5+1+5+1+5 = 17
+}
+
+#[test]
+fn input_state_insert_str_at_cursor_position() {
+    let mut input = InputState::new();
+    input.insert_str("ac");
+    input.cursor_left(); // cursor at 1
+    input.insert_str("bd"); // insert "bd" at cursor
+    assert_eq!(input.buffer(), "abdc");
+    assert_eq!(input.cursor(), 3);
+}
+
+#[test]
+fn input_state_insert_str_crlf_normalized() {
+    let mut input = InputState::new();
+    // Simulate paste with \r\n line endings — insert_str inserts as-is
+    // (normalization happens in the event handler, not InputState)
+    input.insert_str("line1\r\nline2");
+    // The \r\n is inserted literally; the app event handler normalizes before calling insert_str
+    assert_eq!(input.buffer(), "line1\r\nline2");
+}
+
+#[test]
+fn input_state_paste_then_continue_typing() {
+    let mut input = InputState::new();
+    input.insert_str("hello\n");
+    input.insert_char('w');
+    input.insert_char('o');
+    input.insert_char('r');
+    input.insert_char('l');
+    input.insert_char('d');
+    assert_eq!(input.buffer(), "hello\nworld");
+    assert_eq!(input.cursor(), 11);
+}
+
 // --- ScrollState tests ---
 
 #[test]

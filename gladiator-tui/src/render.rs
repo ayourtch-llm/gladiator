@@ -321,11 +321,16 @@ impl Renderer {
         let para = Paragraph::new(line_widgets).block(block);
         frame.render_widget(para, area);
 
-        // Position the terminal cursor at the input cursor location
+        // Position the terminal cursor at the input cursor location.
+        // Only line 0 has the "> " prefix, so lines > 0 start at area.left().
         let prompt_len: u16 = 2; // "> "
         let cursor_line_str = lines[cursor_line];
         let cursor_col_chars = cursor_line_str[..cursor_col].chars().count() as u16;
-        let cursor_x = area.left() + prompt_len + cursor_col_chars;
+        let cursor_x = if cursor_line == 0 {
+            area.left() + prompt_len + cursor_col_chars
+        } else {
+            area.left() + cursor_col_chars
+        };
         let cursor_y = area.top() + 1 + cursor_line as u16; // +1 for top border
         frame.set_cursor_position((cursor_x, cursor_y));
     }
