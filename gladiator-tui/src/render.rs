@@ -320,6 +320,14 @@ impl Renderer {
 
         let para = Paragraph::new(line_widgets).block(block);
         frame.render_widget(para, area);
+
+        // Position the terminal cursor at the input cursor location
+        let prompt_len: u16 = 2; // "> "
+        let cursor_line_str = lines[cursor_line];
+        let cursor_col_chars = cursor_line_str[..cursor_col].chars().count() as u16;
+        let cursor_x = area.left() + prompt_len + cursor_col_chars;
+        let cursor_y = area.top() + 1 + cursor_line as u16; // +1 for top border
+        frame.set_cursor_position((cursor_x, cursor_y));
     }
 
     fn render_status_bar(&self, frame: &mut Frame, area: Rect, status_text: &str, scroll: &ScrollState) {
