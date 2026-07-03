@@ -114,9 +114,10 @@ impl App {
 
     pub fn handle_bus_message(&mut self, msg: &Message) {
         if let Some(app_msg) = bus_to_app_message(msg) {
-            // For streaming, append to last assistant message if same stream
+            // For streaming tokens, append to last assistant message
             let msg_type = msg.meta_type();
-            if msg_type == Some("LlmStream") {
+            let is_stream = matches!(msg_type, Some("LlmStream") | Some("LlmThinking"));
+            if is_stream {
                 let payload = msg.payload_str().unwrap_or_default();
                 if self.chat.message_count() > 0 {
                     let last = self.chat.messages().last().unwrap();
