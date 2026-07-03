@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::Path;
 use tracing::info;
 
@@ -14,6 +15,10 @@ pub struct Config {
     pub llm: LlmConfig,
     #[serde(default = "default_agent")]
     pub agent: AgentConfig,
+    #[serde(default = "default_tools")]
+    pub tools: ToolsConfig,
+    #[serde(default)]
+    pub mcp_servers: HashMap<String, McpServerConfig>,
 }
 
 impl Default for Config {
@@ -24,6 +29,8 @@ impl Default for Config {
             ui: UiConfig::default(),
             llm: LlmConfig::default(),
             agent: AgentConfig::default(),
+            tools: ToolsConfig::default(),
+            mcp_servers: HashMap::new(),
         }
     }
 }
@@ -42,6 +49,9 @@ fn default_llm() -> LlmConfig {
 }
 fn default_agent() -> AgentConfig {
     AgentConfig::default()
+}
+fn default_tools() -> ToolsConfig {
+    ToolsConfig::default()
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -282,6 +292,48 @@ fn default_system_message() -> String {
 }
 fn default_working_dir() -> String {
     ".".to_string()
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ToolsConfig {
+    #[serde(default = "default_tool_on")]
+    pub bash: bool,
+    #[serde(default = "default_tool_on")]
+    pub read: bool,
+    #[serde(default = "default_tool_on")]
+    pub write: bool,
+    #[serde(default = "default_tool_on")]
+    pub edit: bool,
+    #[serde(default = "default_tool_on")]
+    pub glob: bool,
+    #[serde(default = "default_tool_on")]
+    pub grep: bool,
+}
+
+impl Default for ToolsConfig {
+    fn default() -> Self {
+        Self {
+            bash: true,
+            read: true,
+            write: true,
+            edit: true,
+            glob: true,
+            grep: true,
+        }
+    }
+}
+
+fn default_tool_on() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct McpServerConfig {
+    pub command: Vec<String>,
+    #[serde(default)]
+    pub default: bool,
+    #[serde(default)]
+    pub expose: Vec<String>,
 }
 
 impl Config {
