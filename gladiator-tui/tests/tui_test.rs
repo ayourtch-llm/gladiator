@@ -118,6 +118,166 @@ fn input_state_submit() {
     assert_eq!(input.cursor(), 0);
 }
 
+#[test]
+fn input_state_insert_newline() {
+    let mut input = InputState::new();
+    input.insert_str("line1");
+    input.insert_newline();
+    input.insert_str("line2");
+    assert_eq!(input.buffer(), "line1\nline2");
+    assert_eq!(input.cursor(), 11); // 5 + 1 + 5 = 11 bytes
+}
+
+#[test]
+fn input_state_multi_line_cursor_left_right() {
+    let mut input = InputState::new();
+    input.insert_str("ab\ncd");
+    // cursor at end (5)
+    assert_eq!(input.cursor(), 5);
+    // left past newline
+    input.cursor_left();
+    assert_eq!(input.cursor(), 4); // before 'd'
+    input.cursor_left();
+    assert_eq!(input.cursor(), 3); // before 'c'
+    input.cursor_left();
+    assert_eq!(input.cursor(), 2); // before '\n'
+    input.cursor_left();
+    assert_eq!(input.cursor(), 1); // before 'b'
+    input.cursor_left();
+    assert_eq!(input.cursor(), 0);
+    input.cursor_left(); // can't go below 0
+    assert_eq!(input.cursor(), 0);
+    // right past newline
+    input.cursor_right();
+    assert_eq!(input.cursor(), 1);
+    input.cursor_right();
+    assert_eq!(input.cursor(), 2);
+    input.cursor_right();
+    assert_eq!(input.cursor(), 3); // past '\n'
+    input.cursor_right();
+    assert_eq!(input.cursor(), 4);
+    input.cursor_right();
+    assert_eq!(input.cursor(), 5);
+}
+
+#[test]
+fn input_state_multi_line_backspace_across_newline() {
+    let mut input = InputState::new();
+    input.insert_str("line1\nline2");
+    // cursor at end
+    input.cursor_left(); // before '2'
+    input.cursor_left(); // before 'n'
+    input.cursor_left(); // before 'i'
+    input.cursor_left(); // before 'e' (second 'e' in line1)
+    input.cursor_left(); // before '\n'
+    input.backspace(); // remove '\n'
+    assert_eq!(input.buffer(), "line1line2");
+    assert_eq!(input.cursor(), 5);
+}
+
+// --- Command history tests ---
+
+#[test]
+fn input_state_history_basic() {
+    let mut input = InputState::new();
+    input.insert_str("first command");
+    let _ = input.submit();
+    input.insert_str("second command");
+    let _ = input.submit();
+    assert_eq!(input.history().len(), 2);
+    assert_eq!(input.history()[0], "first command");
+    assert_eq!(input.history()[1], "second command");
+}
+
+#[test]
+fn input_state_history_prev_next() {
+    let mut input = InputState::new();
+    input.insert_str("cmd1");
+    let _ = input.submit();
+    input.insert_str("cmd2");
+    let _ = input.submit();
+
+    // Empty buffer, press Up -> go to last command
+    input.history_prev();
+    assert_eq!(input.buffer(), "cmd2");
+    assert_eq!(input.cursor(), input.buffer().len());
+
+    // Press Up again -> go to first command
+    input.history_prev();
+    assert_eq!(input.buffer(), "cmd1");
+
+    // Press Down -> go to second command
+    input.history_next();
+    assert_eq!(input.buffer(), "cmd2");
+
+    // Press Down again -> back to empty input
+    input.history_next();
+    assert_eq!(input.buffer(), "");
+    assert_eq!(input.cursor(), 0);
+}
+
+#[test]
+fn input_state_history_prev_empty() {
+    let mut input = InputState::new();
+    // No history yet, pressing Up should do nothing
+    input.history_prev();
+    assert_eq!(input.buffer(), "");
+    assert_eq!(input.cursor(), 0);
+}
+
+#[test]
+fn input_state_history_prev_then_submit() {
+    let mut input = InputState::new();
+    input.insert_str("cmd1");
+    let _ = input.submit();
+    input.insert_str("cmd2");
+    let _ = input.submit();
+
+    // Navigate to previous command
+    input.history_prev();
+    assert_eq!(input.buffer(), "cmd2");
+
+    // Submit it
+    let text = input.submit();
+    assert_eq!(text, "cmd2");
+    assert_eq!(input.history().len(), 3);
+    assert_eq!(input.history()[2], "cmd2");
+    assert_eq!(input.buffer(), "");
+}
+
+#[test]
+fn input_state_history_no_duplicates_consecutive() {
+    let mut input = InputState::new();
+    input.insert_str("cmd");
+    let _ = input.submit();
+    // Submit same command again
+    input.insert_str("cmd");
+    let _ = input.submit();
+    // Should have 2 entries (we don't deduplicate)
+    assert_eq!(input.history().len(), 2);
+}
+
+#[test]
+fn input_state_history_reset_on_submit() {
+    let mut input = InputState::new();
+    input.insert_str("cmd1");
+    let _ = input.submit();
+    input.insert_str("cmd2");
+    let _ = input.submit();
+
+    // Navigate up
+    input.history_prev();
+    assert_eq!(input.buffer(), "cmd2");
+
+    // Submit
+    let _ = input.submit();
+    assert_eq!(input.buffer(), "");
+
+    // History index should be reset — pressing Up should go to latest
+    input.history_prev();
+    assert_eq!(input.buffer(), "cmd2"); // the one we just submitted
+}
+
 // --- ScrollState tests ---
 
 #[test]

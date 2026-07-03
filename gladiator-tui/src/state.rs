@@ -62,6 +62,8 @@ impl AppMessage {
 pub struct InputState {
     buffer: String,
     cursor: usize,
+    history: Vec<String>,
+    history_index: Option<usize>,
 }
 
 impl InputState {
@@ -69,6 +71,8 @@ impl InputState {
         Self {
             buffer: String::new(),
             cursor: 0,
+            history: Vec::new(),
+            history_index: None,
         }
     }
 
@@ -80,44 +84,129 @@ impl InputState {
         self.cursor
     }
 
+    pub fn history(&self) -> &[String] {
+        &self.history
+    }
+
     pub fn insert_char(&mut self, ch: char) {
         self.buffer.insert(self.cursor, ch);
-        self.cursor += 1;
+        self.cursor += ch.len_utf8();
+    }
+
+    pub fn insert_newline(&mut self) {
+        self.insert_char('\n');
     }
 
     pub fn insert_str(&mut self, s: &str) {
         self.buffer.insert_str(self.cursor, s);
-        self.cursor += s.chars().count();
+        self.cursor += s.len();
     }
 
     pub fn backspace(&mut self) {
         if self.cursor > 0 {
-            self.cursor -= 1;
-            self.buffer.remove(self.cursor);
+            // Find previous char boundary
+            let mut pos = self.cursor - 1;
+            while pos > 0 && !self.buffer.is_char_boundary(pos) {
+                pos -= 1;
+            }
+            self.buffer.remove(pos);
+            self.cursor = pos;
         }
     }
 
     pub fn cursor_left(&mut self) {
         if self.cursor > 0 {
-            self.cursor -= 1;
+            let mut pos = self.cursor - 1;
+            while pos > 0 && !self.buffer.is_char_boundary(pos) {
+                pos -= 1;
+            }
+            self.cursor = pos;
         }
     }
 
     pub fn cursor_right(&mut self) {
         if self.cursor < self.buffer.len() {
-            self.cursor += 1;
+            let mut pos = self.cursor + 1;
+            while pos < self.buffer.len() && !self.buffer.is_char_boundary(pos) {
+                pos += 1;
+            }
+            self.cursor = pos;
+        }
+    }
+
+    /// Move cursor to beginning of line (Home key within multi-line input).
+    pub fn cursor_line_start(&mut self) {
+        // Find the previous newline before cursor
+        let prefix = &self.buffer[..self.cursor];
+        if let Some(pos) = prefix.rfind('\n') {
+            self.cursor = pos + 1;
+        } else {
+            self.cursor = 0;
+        }
+    }
+
+    /// Move cursor to end of line (End key within multi-line input).
+    pub fn cursor_line_end(&mut self) {
+        let suffix = &self.buffer[self.cursor..];
+        if let Some(pos) = suffix.find('\n') {
+            self.cursor += pos;
+        } else {
+            self.cursor = self.buffer.len();
         }
     }
 
     pub fn clear(&mut self) {
         self.buffer.clear();
         self.cursor = 0;
+        self.history_index = None;
     }
 
     pub fn submit(&mut self) -> String {
         let text = self.buffer.clone();
+        if !text.is_empty() {
+            self.history.push(text.clone());
+        }
         self.clear();
         text
+    }
+
+    /// Navigate to previous entry in history. Replaces current buffer.
+    pub fn history_prev(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+        match self.history_index {
+            None => {
+                self.history_index = Some(self.history.len() - 1);
+            }
+            Some(i) => {
+                if i > 0 {
+                    self.history_index = Some(i - 1);
+                }
+            }
+        }
+        if let Some(i) = self.history_index {
+            self.buffer = self.history[i].clone();
+            self.cursor = self.buffer.len();
+        }
+    }
+
+    /// Navigate to next entry in history. Clears buffer at the end.
+    pub fn history_next(&mut self) {
+        match self.history_index {
+            None => {}
+            Some(i) => {
+                if i + 1 < self.history.len() {
+                    self.history_index = Some(i + 1);
+                    self.buffer = self.history[i + 1].clone();
+                    self.cursor = self.buffer.len();
+                } else {
+                    self.history_index = None;
+                    self.buffer.clear();
+                    self.cursor = 0;
+                }
+            }
+        }
     }
 }
 

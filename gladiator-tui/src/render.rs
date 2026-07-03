@@ -66,12 +66,17 @@ impl Renderer {
         status_text: &str,
     ) {
         let area = frame.area();
+
+        // Dynamic input height based on number of lines in buffer
+        let input_lines = input.buffer().lines().count().max(1);
+        let input_height = (input_lines + 1).min(8) as u16; // +1 for top border, max 8
+
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3),
                 Constraint::Min(1),
-                Constraint::Length(3),
+                Constraint::Length(input_height),
                 Constraint::Length(1),
             ])
             .split(area);
@@ -225,41 +230,73 @@ impl Renderer {
         let prompt_str = "> ";
         let cursor_pos = input.cursor();
         let buffer = input.buffer();
-        let mut spans: Vec<Span> = vec![Span::styled(
-            prompt_str,
-            Style::default().fg(self.theme.color_primary()),
-        )];
-        if cursor_pos < buffer.len() {
-            let before: String = buffer[..cursor_pos].chars().collect();
-            let after: String = buffer[cursor_pos..].chars().collect();
-            spans.push(Span::styled(
-                before,
-                Style::default().fg(self.theme.color_text()),
-            ));
-            spans.push(Span::styled(
-                " ",
-                Style::default()
-                    .bg(self.theme.color_primary())
-                    .fg(self.theme.color_primary()),
-            ));
-            spans.push(Span::styled(
-                after,
-                Style::default().fg(self.theme.color_text()),
-            ));
-        } else {
-            spans.push(Span::styled(
-                buffer,
-                Style::default().fg(self.theme.color_text()),
-            ));
-            spans.push(Span::styled(
-                " ",
-                Style::default()
-                    .bg(self.theme.color_primary())
-                    .fg(self.theme.color_primary()),
-            ));
+
+        // Split buffer into lines by newline for multi-line rendering
+        let lines: Vec<&str> = buffer.split('\n').collect();
+
+        // Find which line the cursor is on and the offset within that line
+        let mut char_count = 0usize;
+        let mut cursor_line = 0;
+        let mut cursor_col = 0usize; // byte offset within the line
+        for (i, line) in lines.iter().enumerate() {
+            let line_len = line.len();
+            if cursor_pos <= char_count + line_len {
+                cursor_line = i;
+                cursor_col = cursor_pos - char_count;
+                break;
+            }
+            char_count += line_len + 1; // +1 for the newline
+            if i == lines.len() - 1 {
+                cursor_line = i;
+                cursor_col = line_len;
+            }
         }
 
-        let para = Paragraph::new(Line::from(spans)).block(block);
+        // Handle edge case: cursor at end of last line
+        if cursor_pos == buffer.len() {
+            cursor_line = lines.len() - 1;
+            cursor_col = lines[cursor_line].len();
+        }
+
+        let mut line_widgets: Vec<Line> = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let mut spans: Vec<Span> = Vec::new();
+            if i == 0 {
+                spans.push(Span::styled(
+                    prompt_str,
+                    Style::default().fg(self.theme.color_primary()),
+                ));
+            }
+
+            if i == cursor_line {
+                // Render with cursor highlight
+                let before: String = line[..cursor_col].chars().collect();
+                let after: String = line[cursor_col..].chars().collect();
+                spans.push(Span::styled(
+                    before,
+                    Style::default().fg(self.theme.color_text()),
+                ));
+                spans.push(Span::styled(
+                    " ",
+                    Style::default()
+                        .bg(self.theme.color_primary())
+                        .fg(self.theme.color_primary()),
+                ));
+                spans.push(Span::styled(
+                    after,
+                    Style::default().fg(self.theme.color_text()),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    *line,
+                    Style::default().fg(self.theme.color_text()),
+                ));
+            }
+
+            line_widgets.push(Line::from(spans));
+        }
+
+        let para = Paragraph::new(line_widgets).block(block);
         frame.render_widget(para, area);
     }
 

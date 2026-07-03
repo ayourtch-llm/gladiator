@@ -88,21 +88,40 @@ impl App {
                 None
             }
             KeyCode::Enter => {
-                let text = self.input.submit();
-                if !text.is_empty() {
-                    self.chat.add_message(AppMessage::user(&text));
-                    self.scroll.scroll_to_bottom();
-                    Some(text)
-                } else {
+                if key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT)
+                    || key.modifiers.contains(crossterm::event::KeyModifiers::ALT)
+                {
+                    self.input.insert_newline();
                     None
+                } else {
+                    let text = self.input.submit();
+                    if !text.is_empty() {
+                        self.chat.add_message(AppMessage::user(&text));
+                        self.scroll.scroll_to_bottom();
+                        Some(text)
+                    } else {
+                        None
+                    }
                 }
             }
+            KeyCode::Char('j') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                self.input.insert_newline();
+                None
+            }
             KeyCode::Up => {
-                self.scroll.scroll_up();
+                if key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
+                    self.scroll.scroll_up();
+                } else {
+                    self.input.history_prev();
+                }
                 None
             }
             KeyCode::Down => {
-                self.scroll.scroll_down();
+                if key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
+                    self.scroll.scroll_down();
+                } else {
+                    self.input.history_next();
+                }
                 None
             }
             KeyCode::PageUp => {
