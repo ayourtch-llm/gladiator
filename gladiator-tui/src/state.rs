@@ -127,57 +127,106 @@ impl Default for InputState {
     }
 }
 
+use std::cell::Cell;
+
 #[derive(Debug)]
 pub struct ScrollState {
-    offset: usize,
-    max_visible: usize,
+    offset: Cell<usize>,
+    visible_height: Cell<usize>,
+    total_lines: Cell<usize>,
+    stick_to_bottom: Cell<bool>,
 }
 
 impl ScrollState {
     pub fn new() -> Self {
         Self {
-            offset: 0,
-            max_visible: 0,
+            offset: Cell::new(0),
+            visible_height: Cell::new(0),
+            total_lines: Cell::new(0),
+            stick_to_bottom: Cell::new(true),
         }
     }
 
     pub fn offset(&self) -> usize {
-        self.offset
+        self.offset.get()
     }
 
-    pub fn max_visible(&self) -> usize {
-        self.max_visible
+    pub fn stick_to_bottom(&self) -> bool {
+        self.stick_to_bottom.get()
     }
 
-    pub fn set_offset(&mut self, offset: usize) {
-        self.offset = offset;
+    /// Set the visible height (called by renderer).
+    pub fn set_visible_height(&self, h: usize) {
+        self.visible_height.set(h);
     }
 
-    pub fn set_max_visible(&mut self, max: usize) {
-        self.max_visible = max;
+    /// Set the total line count (called by renderer).
+    pub fn set_total_lines(&self, n: usize) {
+        self.total_lines.set(n);
     }
 
-    pub fn scroll_down(&mut self, total: usize, visible: usize) {
-        if total > visible {
-            let max_offset = total - visible;
-            if self.offset < max_offset {
-                self.offset += 1;
-            }
+    /// Maximum scroll offset (total_lines - visible_height).
+    pub fn max_offset(&self) -> usize {
+        self.total_lines
+            .get()
+            .saturating_sub(self.visible_height.get())
+    }
+
+    /// If stick_to_bottom is true, snap offset to max_offset.
+    /// Called by renderer after setting total_lines/visible_height.
+    pub fn update_if_sticking(&self) {
+        if self.stick_to_bottom.get() {
+            self.offset.set(self.max_offset());
         }
     }
 
     pub fn scroll_up(&mut self) {
-        if self.offset > 0 {
-            self.offset -= 1;
+        self.stick_to_bottom.set(false);
+        let cur = self.offset.get();
+        if cur > 0 {
+            self.offset.set(cur - 1);
         }
     }
 
-    pub fn scroll_to_bottom(&mut self, total: usize, visible: usize) {
-        if total > visible {
-            self.offset = total - visible;
+    pub fn scroll_down(&mut self) {
+        let max = self.max_offset();
+        let cur = self.offset.get();
+        if cur < max {
+            self.offset.set(cur + 1);
+            if cur + 1 >= max {
+                self.stick_to_bottom.set(true);
+            }
         } else {
-            self.offset = 0;
+            self.stick_to_bottom.set(true);
         }
+    }
+
+    pub fn scroll_page_up(&mut self) {
+        self.stick_to_bottom.set(false);
+        let cur = self.offset.get();
+        let vh = self.visible_height.get().max(1);
+        self.offset.set(cur.saturating_sub(vh));
+    }
+
+    pub fn scroll_page_down(&mut self) {
+        let max = self.max_offset();
+        let cur = self.offset.get();
+        let vh = self.visible_height.get().max(1);
+        let new_offset = (cur + vh).min(max);
+        self.offset.set(new_offset);
+        if new_offset >= max {
+            self.stick_to_bottom.set(true);
+        }
+    }
+
+    pub fn scroll_to_top(&mut self) {
+        self.offset.set(0);
+        self.stick_to_bottom.set(false);
+    }
+
+    pub fn scroll_to_bottom(&mut self) {
+        self.stick_to_bottom.set(true);
+        self.offset.set(self.max_offset());
     }
 }
 
@@ -218,6 +267,13 @@ impl ChatState {
             last.content.push_str(text);
         } else {
             self.messages.push(AppMessage::assistant(text));
+        }
+    }
+
+    /// Replace the content of the last message.
+    pub fn replace_last(&mut self, content: String) {
+        if let Some(last) = self.messages.last_mut() {
+            last.content = content;
         }
     }
 

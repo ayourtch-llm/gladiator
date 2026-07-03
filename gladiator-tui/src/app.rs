@@ -23,6 +23,8 @@ pub struct App {
     renderer: Renderer,
     status: String,
     should_quit: bool,
+    last_stream_type: Option<String>,
+    last_tool_call_index: Option<usize>,
 }
 
 impl App {
@@ -34,6 +36,8 @@ impl App {
             renderer: Renderer::new(theme),
             status: String::new(),
             should_quit: false,
+            last_stream_type: None,
+            last_tool_call_index: None,
         }
     }
 
@@ -87,10 +91,35 @@ impl App {
                 let text = self.input.submit();
                 if !text.is_empty() {
                     self.chat.add_message(AppMessage::user(&text));
+                    self.scroll.scroll_to_bottom();
                     Some(text)
                 } else {
                     None
                 }
+            }
+            KeyCode::Up => {
+                self.scroll.scroll_up();
+                None
+            }
+            KeyCode::Down => {
+                self.scroll.scroll_down();
+                None
+            }
+            KeyCode::PageUp => {
+                self.scroll.scroll_page_up();
+                None
+            }
+            KeyCode::PageDown => {
+                self.scroll.scroll_page_down();
+                None
+            }
+            KeyCode::Home => {
+                self.scroll.scroll_to_top();
+                None
+            }
+            KeyCode::End => {
+                self.scroll.scroll_to_bottom();
+                None
             }
             KeyCode::Backspace => {
                 self.input.backspace();
@@ -113,25 +142,90 @@ impl App {
     }
 
     pub fn handle_bus_message(&mut self, msg: &Message) {
-        if let Some(app_msg) = bus_to_app_message(msg) {
-            // For streaming tokens, append to last assistant message
-            let msg_type = msg.meta_type();
-            let is_stream = matches!(msg_type, Some("LlmStream") | Some("LlmThinking"));
-            if is_stream {
-                let payload = msg.payload_str().unwrap_or_default();
+        let msg_type = msg.meta_type().unwrap_or_default().to_string();
+
+        // Filter out noise types
+        if matches!(
+            msg_type.as_str(),
+            "LlmStreamEnd" | "LlmToolCalls" | "StreamStats"
+        ) {
+            return;
+        }
+
+        // Handle streaming tokens (append to last assistant message)
+        if matches!(msg_type.as_str(), "LlmStream" | "LlmThinking") {
+            let payload = msg.payload_str().unwrap_or_default();
+            if !payload.is_empty() {
                 if self.chat.message_count() > 0 {
                     let last = self.chat.messages().last().unwrap();
                     if last.role == crate::state::AppMessageRole::Assistant {
+                        // Insert newline on thinking→content or content→thinking transition
+                        if let Some(ref prev) = self.last_stream_type {
+                            if prev.as_str() != msg_type.as_str() {
+                                self.chat.append_to_last("\n");
+                            }
+                        }
                         self.chat.append_to_last(&payload);
+                        self.last_stream_type = Some(msg_type);
                         return;
                     }
                 }
                 self.chat.add_message(AppMessage::assistant(&payload));
-            } else {
-                self.chat.add_message(app_msg);
+                self.last_stream_type = Some(msg_type);
             }
-            // auto-scroll to bottom
-            self.scroll.scroll_to_bottom(self.chat.message_count(), 0);
+            return;
+        }
+
+        // Handle tool call building progress (replace last tool message if same index)
+        if msg_type == "LlmToolCall" {
+            let call_index = msg
+                .payload
+                .get("index")
+                .and_then(|i| i.as_u64())
+                .map(|v| v as usize);
+            let name = msg
+                .payload
+                .get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str())
+                .unwrap_or("");
+            let args = msg
+                .payload
+                .get("function")
+                .and_then(|f| f.get("arguments"))
+                .and_then(|a| a.as_str())
+                .unwrap_or("");
+            let content = if !name.is_empty() && !args.is_empty() {
+                format!("{}({})", name, args)
+            } else if !name.is_empty() {
+                format!("{}(building...)", name)
+            } else {
+                "building...".to_string()
+            };
+
+            // If same tool call index and last message is Tool, replace it
+            if call_index == self.last_tool_call_index && self.chat.message_count() > 0 {
+                let last = self.chat.messages().last().unwrap();
+                if last.role == crate::state::AppMessageRole::Tool {
+                    self.chat.replace_last(content);
+                    return;
+                }
+            }
+            // New tool call — add new message
+            self.chat.add_message(AppMessage {
+                role: crate::state::AppMessageRole::Tool,
+                content,
+            });
+            self.last_tool_call_index = call_index;
+            self.last_stream_type = None;
+            return;
+        }
+
+        // All other message types
+        if let Some(app_msg) = bus_to_app_message(msg) {
+            self.chat.add_message(app_msg);
+            self.last_stream_type = None;
+            self.last_tool_call_index = None;
         }
     }
 

@@ -2,7 +2,7 @@ use crate::state::{AppMessage, AppMessageRole};
 use gladiator_core::message::Message;
 
 /// Convert a bus Message to an AppMessage for display.
-/// Returns None if the message type is not recognized/displayable.
+/// Returns None if the message type is not recognized or is noise.
 pub fn bus_to_app_message(msg: &Message) -> Option<AppMessage> {
     let msg_type = msg.meta_type();
     let content = msg.payload_str().unwrap_or_default();
@@ -10,10 +10,34 @@ pub fn bus_to_app_message(msg: &Message) -> Option<AppMessage> {
     match msg_type {
         Some(t) => match t {
             "UserInput" => Some(AppMessage::user(content)),
-            "LlmStream" | "LlmStreamEnd" | "LlmThinking" | "LlmDump" => {
+            "LlmStream" | "LlmThinking" | "LlmDump" => {
                 Some(AppMessage::assistant(content))
             }
-            "LlmToolCall" | "LlmToolResult" | "LlmToolCalls" => {
+            // Filter out noise types
+            "LlmStreamEnd" | "LlmToolCalls" | "StreamStats" => None,
+            "LlmToolCall" => {
+                // Tool call building progress — parse JSON payload
+                let name = msg.payload.get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("");
+                let args = msg.payload.get("function")
+                    .and_then(|f| f.get("arguments"))
+                    .and_then(|a| a.as_str())
+                    .unwrap_or("");
+                let content = if !name.is_empty() && !args.is_empty() {
+                    format!("{}({})", name, args)
+                } else if !name.is_empty() {
+                    format!("{}(building...)", name)
+                } else {
+                    "building...".to_string()
+                };
+                Some(AppMessage {
+                    role: AppMessageRole::Tool,
+                    content,
+                })
+            }
+            "LlmToolResult" => {
                 Some(AppMessage {
                     role: AppMessageRole::Tool,
                     content,
@@ -34,7 +58,6 @@ pub fn bus_to_app_message(msg: &Message) -> Option<AppMessage> {
                 "[continue] {}",
                 content
             ))),
-            "StreamStats" => Some(AppMessage::info(content)),
             _ => None,
         },
         None => None,

@@ -6,67 +6,88 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
-/// Word-wrap text into lines at the given widths.
-/// `first_width` is the available width for the first line (after prefix).
-/// `cont_width` is the available width for continuation lines.
-/// Returns a Vec of wrapped line strings (without prefix).
+/// Word-wrap text into visual lines, preserving newlines.
+/// `first_width` is the available width for the first visual line (after prefix).
+/// `cont_width` is the available width for all subsequent visual lines.
+/// Newlines in the content produce line breaks; each sub-line is word-wrapped.
 fn wrap_text(content: &str, first_width: usize, cont_width: usize) -> Vec<String> {
-    let mut lines: Vec<String> = Vec::new();
-    let mut current = String::new();
-    let mut current_len = 0usize;
+    let mut result: Vec<String> = Vec::new();
 
-    for word in content.split_whitespace() {
-        let avail = if lines.is_empty() {
-            first_width
-        } else {
-            cont_width
-        };
-        let word_len = word.chars().count();
+    for line in content.split('\n') {
+        if line.is_empty() || line.chars().all(char::is_whitespace) {
+            // Empty line from \n - preserve as blank visual line
+            result.push(String::new());
+            continue;
+        }
 
-        if current.is_empty() {
-            if word_len > avail && avail > 0 {
-                let mut remaining: Vec<char> = word.chars().collect();
-                while !remaining.is_empty() {
-                    let avail = if lines.is_empty() {
-                        first_width
-                    } else {
-                        cont_width
-                    };
-                    let take: String = remaining.iter().take(avail).collect();
-                    let take_len = take.chars().count();
-                    lines.push(take);
-                    remaining.drain(0..take_len.min(remaining.len()));
+        let mut current = String::new();
+        let mut current_len = 0usize;
+        let mut current_width = 0usize;
+
+        for word in line.split_whitespace() {
+            let word_len = word.chars().count();
+
+            if current.is_empty() {
+                // Starting a new visual line
+                current_width = if result.is_empty() {
+                    first_width
+                } else {
+                    cont_width
+                };
+
+                if word_len > current_width && current_width > 0 {
+                    // Word longer than available width - hard-wrap
+                    let chars: Vec<char> = word.chars().collect();
+                    let mut start = 0;
+                    while start < chars.len() {
+                        let w = if result.is_empty() { first_width } else { cont_width };
+                        let end = (start + w).min(chars.len());
+                        result.push(chars[start..end].iter().collect());
+                        start = end;
+                    }
+                    // current stays empty
+                } else {
+                    current = word.to_string();
+                    current_len = word_len;
+                }
+            } else if current_len + 1 + word_len > current_width {
+                // Word doesn't fit on current line - wrap
+                result.push(std::mem::take(&mut current));
+                current_len = 0;
+
+                if word_len > cont_width && cont_width > 0 {
+                    // Word too long for a full line - hard-wrap
+                    let chars: Vec<char> = word.chars().collect();
+                    let mut start = 0;
+                    while start < chars.len() {
+                        let end = (start + cont_width).min(chars.len());
+                        result.push(chars[start..end].iter().collect());
+                        start = end;
+                    }
+                } else {
+                    current = word.to_string();
+                    current_len = word_len;
+                    current_width = cont_width;
                 }
             } else {
-                current = word.to_string();
-                current_len = word_len;
+                // Word fits on current line
+                current.push(' ');
+                current.push_str(word);
+                current_len += 1 + word_len;
             }
-        } else if current_len + 1 + word_len > avail {
-            lines.push(std::mem::take(&mut current));
-            if word_len > cont_width && cont_width > 0 {
-                let mut remaining: Vec<char> = word.chars().collect();
-                while !remaining.is_empty() {
-                    let take: String = remaining.iter().take(cont_width).collect();
-                    let take_len = take.chars().count();
-                    lines.push(take);
-                    remaining.drain(0..take_len.min(remaining.len()));
-                }
-            } else {
-                current = word.to_string();
-                current_len = word_len;
-            }
-        } else {
-            current.push(' ');
-            current.push_str(word);
-            current_len += 1 + word_len;
+        }
+
+        // Push remaining current (if non-empty)
+        if !current.is_empty() {
+            result.push(current);
         }
     }
 
-    if !current.is_empty() || lines.is_empty() {
-        lines.push(current);
+    if result.is_empty() {
+        result.push(String::new());
     }
 
-    lines
+    result
 }
 
 pub struct Renderer {
@@ -148,11 +169,14 @@ impl Renderer {
         }
 
         let total_lines = all_visual_lines.len();
-        let offset = if total_lines > visible_height {
-            scroll.offset().min(total_lines.saturating_sub(visible_height))
-        } else {
-            0
-        };
+
+        // Update scroll state with current dimensions
+        scroll.set_total_lines(total_lines);
+        scroll.set_visible_height(visible_height);
+        scroll.update_if_sticking();
+
+        let max_offset = total_lines.saturating_sub(visible_height);
+        let offset = scroll.offset().min(max_offset);
 
         let visible: Vec<Line> = all_visual_lines
             .into_iter()

@@ -124,32 +124,40 @@ fn input_state_submit() {
 fn scroll_state_new() {
     let scroll = ScrollState::new();
     assert_eq!(scroll.offset(), 0);
-    assert_eq!(scroll.max_visible(), 0);
+    assert!(scroll.stick_to_bottom());
 }
 
 #[test]
 fn scroll_state_scroll_down() {
     let mut scroll = ScrollState::new();
-    scroll.set_max_visible(20);
-    scroll.scroll_down(100, 20);
-    // scroll_down increments by 1
-    assert_eq!(scroll.offset(), 1);
-    // scroll to bottom should clamp
-    scroll.scroll_to_bottom(100, 20);
+    scroll.set_total_lines(100);
+    scroll.set_visible_height(20);
+    // Start stick_to_bottom = true, offset should be at max
+    scroll.update_if_sticking();
+    assert_eq!(scroll.offset(), 80);
+    // Scroll up from bottom
+    scroll.scroll_up();
+    assert_eq!(scroll.offset(), 79);
+    // Scroll down
+    scroll.scroll_down();
     assert_eq!(scroll.offset(), 80);
 }
 
 #[test]
 fn scroll_state_scroll_up() {
     let mut scroll = ScrollState::new();
-    scroll.set_max_visible(20);
-    scroll.set_offset(50);
+    scroll.set_total_lines(100);
+    scroll.set_visible_height(20);
+    scroll.update_if_sticking();
+    // Should be at bottom (80)
+    assert_eq!(scroll.offset(), 80);
     scroll.scroll_up();
-    assert_eq!(scroll.offset(), 49);
+    assert_eq!(scroll.offset(), 79);
     scroll.scroll_up();
-    assert_eq!(scroll.offset(), 48);
-    // can't go below 0
-    scroll.set_offset(0);
+    assert_eq!(scroll.offset(), 78);
+    // Scroll to top
+    scroll.scroll_to_top();
+    assert_eq!(scroll.offset(), 0);
     scroll.scroll_up();
     assert_eq!(scroll.offset(), 0);
 }
@@ -157,22 +165,55 @@ fn scroll_state_scroll_up() {
 #[test]
 fn scroll_state_scroll_to_bottom() {
     let mut scroll = ScrollState::new();
-    scroll.set_max_visible(20);
-    scroll.set_offset(50);
-    scroll.scroll_to_bottom(100, 20);
+    scroll.set_total_lines(100);
+    scroll.set_visible_height(20);
+    scroll.scroll_to_top();
+    assert_eq!(scroll.offset(), 0);
+    scroll.scroll_to_bottom();
     assert_eq!(scroll.offset(), 80);
 }
 
 #[test]
 fn scroll_state_stick_to_bottom() {
-    let mut scroll = ScrollState::new();
-    scroll.set_max_visible(20);
-    // start at bottom
-    scroll.scroll_to_bottom(100, 20);
+    let scroll = ScrollState::new();
+    scroll.set_total_lines(100);
+    scroll.set_visible_height(20);
+    // stick_to_bottom defaults to true
+    scroll.update_if_sticking();
     assert_eq!(scroll.offset(), 80);
-    // new messages arrive, should stick to bottom
-    scroll.scroll_to_bottom(120, 20);
+    // More lines arrive
+    scroll.set_total_lines(120);
+    scroll.update_if_sticking();
     assert_eq!(scroll.offset(), 100);
+}
+
+#[test]
+fn scroll_state_scroll_up_clears_stick() {
+    let mut scroll = ScrollState::new();
+    scroll.set_total_lines(100);
+    scroll.set_visible_height(20);
+    scroll.update_if_sticking();
+    assert!(scroll.stick_to_bottom());
+    scroll.scroll_up();
+    assert!(!scroll.stick_to_bottom());
+    // New lines arrive, should NOT auto-scroll
+    scroll.set_total_lines(120);
+    scroll.update_if_sticking();
+    assert_eq!(scroll.offset(), 79); // stayed at 79, didn't jump to 100
+}
+
+#[test]
+fn scroll_state_page_up_down() {
+    let mut scroll = ScrollState::new();
+    scroll.set_total_lines(100);
+    scroll.set_visible_height(20);
+    scroll.update_if_sticking();
+    assert_eq!(scroll.offset(), 80);
+    scroll.scroll_page_up();
+    assert_eq!(scroll.offset(), 60);
+    scroll.scroll_page_down();
+    assert_eq!(scroll.offset(), 80);
+    assert!(scroll.stick_to_bottom());
 }
 
 // --- ChatState / AppMessage tests ---
@@ -268,20 +309,45 @@ fn event_llm_stream_to_assistant() {
 }
 
 #[test]
-fn event_llm_stream_end_to_assistant() {
+fn event_llm_stream_end_filtered() {
+    // LlmStreamEnd is filtered out as noise
     let msg = Message::text("llm-stream", "llm-0", "done")
         .with_type("LlmStreamEnd");
-    let app_msg = bus_to_app_message(&msg).unwrap();
-    assert_eq!(app_msg.role, AppMessageRole::Assistant);
+    assert!(bus_to_app_message(&msg).is_none());
 }
 
 #[test]
 fn event_llm_tool_call_to_tool() {
-    let msg = Message::text("llm-tool", "llm-0", "bash: ls -la")
-        .with_type("LlmToolCall");
+    // LlmToolCall (streaming delta) shows tool-building progress.
+    // Payload is JSON with index, id, function.name, function.arguments.
+    let msg = Message::new("llm-tool", "llm-0", serde_json::json!({
+        "index": 0,
+        "id": "call_1",
+        "function": {
+            "name": "bash",
+            "arguments": "{\"command\": \"ls -la\"}"
+        }
+    }))
+    .with_type("LlmToolCall");
     let app_msg = bus_to_app_message(&msg).unwrap();
     assert_eq!(app_msg.role, AppMessageRole::Tool);
     assert!(app_msg.content.contains("bash"));
+    assert!(app_msg.content.contains("ls -la"));
+}
+
+#[test]
+fn event_llm_tool_calls_filtered() {
+    // LlmToolCalls (plural, final JSON) is filtered out.
+    let msg = Message::text("llm-tool", "llm-0", "[{...}]")
+        .with_type("LlmToolCalls");
+    assert!(bus_to_app_message(&msg).is_none());
+}
+
+#[test]
+fn event_stream_stats_filtered() {
+    let msg = Message::text("llm-stats", "llm-0", "chars: 100")
+        .with_type("StreamStats");
+    assert!(bus_to_app_message(&msg).is_none());
 }
 
 #[test]
