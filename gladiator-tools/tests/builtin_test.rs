@@ -594,3 +594,36 @@ async fn test_bash_sandbox_write_block_still_enforced() {
     );
     let _ = std::fs::remove_file("/etc/gladiator_sandbox_test2");
 }
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn test_bash_sandbox_dev_null_writable() {
+    use gladiator_core::config::SandboxConfig;
+    let tmp = TempDir::new().unwrap();
+    let tmp_path = tmp.path().to_str().unwrap().to_string();
+    let sandbox = SandboxConfig { enabled: true, network: false };
+    let tool = BashTool::with_sandbox(&tmp_path, sandbox);
+    // Many shell commands redirect stderr to /dev/null — it must be writable
+    let args = json!({
+        "command": "echo hello 2>/dev/null; echo \"redirect_ok=$?\"",
+        "working_dir": tmp_path,
+    });
+    let result = tool.execute(&args).await.unwrap();
+    assert!(result.contains("redirect_ok=0"), "Expected /dev/null redirect to succeed, got: {}", result);
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn test_bash_sandbox_git_init() {
+    use gladiator_core::config::SandboxConfig;
+    let tmp = TempDir::new().unwrap();
+    let tmp_path = tmp.path().to_str().unwrap().to_string();
+    let sandbox = SandboxConfig { enabled: true, network: false };
+    let tool = BashTool::with_sandbox(&tmp_path, sandbox);
+    let args = json!({
+        "command": "git init 2>/dev/null && echo GIT_OK",
+        "working_dir": tmp_path,
+    });
+    let result = tool.execute(&args).await.unwrap();
+    assert!(result.contains("GIT_OK"), "Expected git init to succeed under sandbox, got: {}", result);
+}

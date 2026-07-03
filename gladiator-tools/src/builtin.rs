@@ -357,6 +357,8 @@ impl BashTool {
         profile.push_str("(allow ipc*)\n");
         profile.push_str("(allow sysctl*)\n");
         profile.push_str("(allow file-read*)\n");
+        // Allow /dev/null (used by shell redirects like 2>/dev/null), /dev/tty, etc.
+        profile.push_str("(allow file-write* (subpath \"/dev\"))\n");
         // Allow writing to common temp directories
         for tmp_path in &["/tmp", "/private/tmp", "/var/tmp"] {
             profile.push_str(&format!(
