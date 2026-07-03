@@ -1,6 +1,5 @@
 use gladiator_core::*;
 use gladiator_tools::*;
-use serde::Deserialize;
 use async_trait::async_trait;
 
 // =========================================================================
@@ -174,4 +173,12 @@ fn tool_registry_to_openai_json() {
     let json = registry.to_openai_json();
     assert!(json.is_array());
     assert_eq!(json[0]["function"]["name"], "echo");
+}
+
+#[test]
+fn tool_registry_rejects_duplicates() {
+    let mut registry = ToolRegistry::new();
+    assert!(registry.add(Box::new(EchoTool)));
+    assert!(!registry.add(Box::new(EchoTool)));
+    assert_eq!(registry.len(), 1);
 }

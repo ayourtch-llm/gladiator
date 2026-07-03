@@ -99,11 +99,13 @@ pub struct McpClientHandler;
 impl ClientHandler for McpClientHandler {}
 
 /// Lightweight handle returned after spawning an MCP server.
+/// Owns the service loop JoinHandle so it can shut down the child process.
 pub struct McpServerHandle {
     prefix: String,
     peer: Arc<Mutex<rmcp::Peer<RoleClient>>>,
     tools: Vec<RmcpTool>,
     config: McpServerConfig,
+    service_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl McpServerHandle {
@@ -135,6 +137,22 @@ impl McpServerHandle {
 
     pub fn prefix(&self) -> &str {
         &self.prefix
+    }
+
+    /// Shut down the MCP server child process by aborting the service loop.
+    /// When the service loop is dropped, the transport closes and the child process exits.
+    pub fn shutdown(mut self) {
+        if let Some(handle) = self.service_handle.take() {
+            handle.abort();
+        }
+    }
+}
+
+impl Drop for McpServerHandle {
+    fn drop(&mut self) {
+        if let Some(handle) = self.service_handle.take() {
+            handle.abort();
+        }
     }
 }
 
@@ -199,13 +217,13 @@ impl McpServerRunner {
         let service_handle = tokio::spawn(async move {
             let _ = running_service.waiting().await;
         });
-        std::mem::forget(service_handle);
 
         Ok(McpServerHandle {
             prefix: self.prefix.clone(),
             peer,
             tools,
             config: self.config.clone(),
+            service_handle: Some(service_handle),
         })
     }
 }

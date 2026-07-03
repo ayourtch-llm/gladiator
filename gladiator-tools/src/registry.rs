@@ -1,5 +1,6 @@
 use crate::tool::{Tool, ToolSyntax};
 use std::sync::Arc;
+use tracing::warn;
 
 /// Registry that holds all available tools and provides OpenAI-compatible
 /// tool definitions for the LLM.
@@ -12,12 +13,24 @@ impl ToolRegistry {
         Self { tools: Vec::new() }
     }
 
-    pub fn add(&mut self, tool: Box<dyn Tool>) {
+    pub fn add(&mut self, tool: Box<dyn Tool>) -> bool {
+        let name = tool.name().to_string();
+        if self.tools.iter().any(|t| t.name() == name) {
+            warn!("Tool '{}' already in registry, skipping duplicate", name);
+            return false;
+        }
         self.tools.push(Arc::from(tool));
+        true
     }
 
-    pub fn add_arc(&mut self, tool: Arc<dyn Tool>) {
+    pub fn add_arc(&mut self, tool: Arc<dyn Tool>) -> bool {
+        let name = tool.name().to_string();
+        if self.tools.iter().any(|t| t.name() == name) {
+            warn!("Tool '{}' already in registry, skipping duplicate", name);
+            return false;
+        }
         self.tools.push(tool);
+        true
     }
 
     pub fn len(&self) -> usize {
