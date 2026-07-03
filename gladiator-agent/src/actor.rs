@@ -167,7 +167,12 @@ impl Actor for AgentActor {
                                     s.buffer_user_message(user_message);
                                     continue;
                                 }
-                                s.add_user_message(user_message);
+                                if s.was_interrupted {
+                                    s.merge_user_message(user_message);
+                                    s.was_interrupted = false;
+                                } else {
+                                    s.add_user_message(user_message);
+                                }
                             }
 
                             let messages = {
@@ -196,10 +201,24 @@ impl Actor for AgentActor {
                         Ok(msg) => {
                             let output = msg.payload_str().unwrap_or_else(|| msg.payload.to_string());
                             debug!("Agent {} received LLM output: {}", self.index, output);
-                            {
+                            // Check if this is an interrupt message from the LLM
+                            if output.starts_with("Interrupted:") {
                                 let mut s = state.lock().await;
-                                s.add_assistant_message(output);
-                                s.increment_iteration();
+                                s.was_interrupted = true;
+                                drop(s);
+                                // Forward to TUI as a warning so the user sees the interrupt
+                                let warn_msg = Message::new(
+                                    &self.stream_output_topic,
+                                    &self.id(),
+                                    output.clone(),
+                                ).with_type("Warning");
+                                let _ = bus.publish(&self.id(), warn_msg).await;
+                            } else {
+                                {
+                                    let mut s = state.lock().await;
+                                    s.add_assistant_message(output);
+                                    s.increment_iteration();
+                                }
                             }
                         }
                         Err(RecvError::Lagged(n)) => warn!("Agent {} output lagged: {}", self.index, n),

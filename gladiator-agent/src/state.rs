@@ -6,6 +6,7 @@ pub struct ConversationState {
     pub iteration_count: u32,
     pub pending_tool_calls: HashSet<String>,
     pub pending_messages: Vec<String>,
+    pub was_interrupted: bool,
 }
 
 impl ConversationState {
@@ -14,10 +15,31 @@ impl ConversationState {
     }
 
     pub fn add_user_message(&mut self, content: impl Into<String>) {
+        let content_str = content.into();
         self.messages.push(serde_json::json!({
             "role": "user",
-            "content": content.into()
+            "content": content_str
         }));
+    }
+
+    /// Merge a user message with the last message if it's also a user message.
+    /// If the last message is a user message, append the new content to it
+    /// (separated by a newline). Otherwise, add as a new user message.
+    /// This is used after an interrupt to avoid sending two user messages
+    /// in a row to the LLM.
+    pub fn merge_user_message(&mut self, content: impl Into<String>) {
+        let content_str = content.into();
+        if let Some(last) = self.messages.last_mut() {
+            if last.get("role").and_then(|r| r.as_str()) == Some("user") {
+                if let Some(existing) = last.get("content").and_then(|c| c.as_str()).map(|s| s.to_string()) {
+                    let new_content = format!("{}\n{}", existing, content_str);
+                    last["content"] = serde_json::Value::String(new_content);
+                    return;
+                }
+            }
+        }
+        // If last message is not a user message, add as new user message
+        self.add_user_message(content_str);
     }
 
     pub fn add_assistant_message(&mut self, content: impl Into<String>) {

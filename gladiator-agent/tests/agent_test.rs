@@ -153,3 +153,61 @@ fn conversation_state_max_reached() {
     }
     assert!(state.max_reached(5));
 }
+
+// =========================================================================
+// Interrupt / message sequence repair tests
+// =========================================================================
+
+#[test]
+fn conversation_state_was_interrupted_default_false() {
+    let state = ConversationState::new();
+    assert!(!state.was_interrupted);
+}
+
+#[test]
+fn conversation_state_was_interrupted_set() {
+    let mut state = ConversationState::new();
+    state.was_interrupted = true;
+    assert!(state.was_interrupted);
+}
+
+#[test]
+fn merge_user_message_appends_to_last_user() {
+    let mut state = ConversationState::new();
+    state.add_user_message("Hello");
+    state.merge_user_message("World");
+    assert_eq!(state.messages.len(), 1, "Should have 1 message, not 2");
+    assert_eq!(state.messages[0]["role"], "user");
+    assert_eq!(state.messages[0]["content"], "Hello\nWorld");
+}
+
+#[test]
+fn merge_user_message_adds_new_when_last_is_assistant() {
+    let mut state = ConversationState::new();
+    state.add_user_message("Hello");
+    state.add_assistant_message("Hi there");
+    state.merge_user_message("World");
+    assert_eq!(state.messages.len(), 3);
+    assert_eq!(state.messages[1]["role"], "assistant");
+    assert_eq!(state.messages[2]["role"], "user");
+    assert_eq!(state.messages[2]["content"], "World");
+}
+
+#[test]
+fn merge_user_message_adds_new_when_empty() {
+    let mut state = ConversationState::new();
+    state.merge_user_message("Hello");
+    assert_eq!(state.messages.len(), 1);
+    assert_eq!(state.messages[0]["role"], "user");
+    assert_eq!(state.messages[0]["content"], "Hello");
+}
+
+#[test]
+fn merge_user_message_multiple_merges() {
+    let mut state = ConversationState::new();
+    state.add_user_message("first");
+    state.merge_user_message("second");
+    state.merge_user_message("third");
+    assert_eq!(state.messages.len(), 1);
+    assert_eq!(state.messages[0]["content"], "first\nsecond\nthird");
+}

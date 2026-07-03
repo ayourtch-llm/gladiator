@@ -208,7 +208,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     bus.register_announcement(gladiator_core::ActorAnnouncement {
         id: "gladiator-tui".to_string(),
         subscriptions: vec![config.topics.agent_stream.clone()],
-        publications: vec![config.topics.agent_in.clone()],
+        publications: vec![config.topics.agent_in.clone(), config.topics.user_control.clone()],
     })
     .await;
 

@@ -6,7 +6,7 @@ use gladiator_core::bus::Bus;
 use gladiator_core::config::TopicsConfig;
 use gladiator_core::message::Message;
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use crossterm::event::{
     self, DisableBracketedPaste, EnableBracketedPaste, Event as CrosstermEvent, KeyCode, KeyEvent,
 };
@@ -330,6 +330,9 @@ pub async fn run_app(
     // Clear screen
     terminal.clear().ok();
 
+    // Track double-ESC for interrupt
+    let mut last_esc_time: Option<Instant> = None;
+
     // Main loop
     let tick = Duration::from_millis(50);
     loop {
@@ -356,8 +359,33 @@ pub async fn run_app(
             if let Ok(ev) = event::read() {
                 match ev {
                     CrosstermEvent::Key(key) => {
-                        if let Some(text) = app.handle_key(key) {
-                            let _ = user_input_tx.send(text);
+                        if key.code == KeyCode::Esc {
+                            let now = Instant::now();
+                            let should_interrupt = last_esc_time
+                                .map(|t| now.duration_since(t) < Duration::from_millis(500))
+                                .unwrap_or(false);
+                            if should_interrupt {
+                                let interrupt_payload = serde_json::json!({
+                                    "type": "interrupt",
+                                    "reason": "user_stopped"
+                                });
+                                let msg = Message::new(
+                                    &topics.user_control,
+                                    "gladiator-tui",
+                                    interrupt_payload,
+                                );
+                                let _ = bus.publish("gladiator-tui", msg).await;
+                                app.chat_mut().add_message(AppMessage::system("Stopping inference..."));
+                                app.scroll_mut().scroll_to_bottom();
+                                app.set_status("Interrupt sent");
+                                last_esc_time = None;
+                            } else {
+                                last_esc_time = Some(now);
+                            }
+                        } else {
+                            if let Some(text) = app.handle_key(key) {
+                                let _ = user_input_tx.send(text);
+                            }
                         }
                     }
                     CrosstermEvent::Paste(data) => {
