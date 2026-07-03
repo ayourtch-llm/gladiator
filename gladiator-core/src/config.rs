@@ -308,6 +308,8 @@ pub struct ToolsConfig {
     pub glob: bool,
     #[serde(default = "default_tool_on")]
     pub grep: bool,
+    #[serde(default)]
+    pub sandbox: SandboxConfig,
 }
 
 impl Default for ToolsConfig {
@@ -319,6 +321,24 @@ impl Default for ToolsConfig {
             edit: true,
             glob: true,
             grep: true,
+            sandbox: SandboxConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct SandboxConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub network: bool,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            network: false,
         }
     }
 }

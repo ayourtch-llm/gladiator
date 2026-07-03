@@ -1,6 +1,7 @@
 use crate::tool::Tool;
 use async_trait::async_trait;
-use std::path::Path;
+use gladiator_core::config::SandboxConfig;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 
@@ -304,19 +305,76 @@ impl Tool for EditFileTool {
 
 pub struct BashTool {
     working_dir: String,
+    sandbox: SandboxConfig,
 }
 
 impl BashTool {
     pub fn new() -> Self {
         Self {
             working_dir: ".".to_string(),
+            sandbox: SandboxConfig::default(),
         }
     }
 
     pub fn with_working_dir(working_dir: impl Into<String>) -> Self {
         Self {
             working_dir: working_dir.into(),
+            sandbox: SandboxConfig::default(),
         }
+    }
+
+    pub fn with_sandbox(working_dir: impl Into<String>, sandbox: SandboxConfig) -> Self {
+        Self {
+            working_dir: working_dir.into(),
+            sandbox,
+        }
+    }
+
+    /// Generate a macOS sandbox-exec profile string.
+    /// Allows reading any file, executing processes, and writing to the working dir and /tmp.
+    /// Denies network access unless `allow_network` is true.
+    fn generate_sandbox_profile(&self, working_dir: &str) -> String {
+        let mut profile = "(version 1)\n".to_string();
+        if !self.sandbox.network {
+            profile.push_str("(deny network*)\n");
+        }
+        profile.push_str("(allow process*)\n");
+        profile.push_str("(allow file-read*)\n");
+        // Allow writing to common temp directories
+        for tmp_path in &["/tmp", "/private/tmp", "/var/tmp"] {
+            profile.push_str(&format!(
+                "(allow file-write* (subpath \"{}\"))\n",
+                tmp_path
+            ));
+        }
+        // Allow writing to the working directory
+        if !working_dir.is_empty() {
+            profile.push_str(&format!(
+                "(allow file-write* (subpath \"{}\"))\n",
+                working_dir
+            ));
+        }
+        profile.push_str("(deny file-write*)\n");
+        profile
+    }
+
+    /// Resolve working_dir to an absolute path for the sandbox profile.
+    fn resolve_working_dir(&self, work_dir: &str) -> Result<PathBuf, String> {
+        let path = Path::new(work_dir);
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map_err(|e| format!("Execution failed: {}", e))?
+                .join(path)
+        };
+        // Canonicalize to resolve symlinks
+        absolute
+            .canonicalize()
+            .map_err(|e| format!("Execution failed: cannot resolve working dir: {}", e))
+            .map(|p| p.to_string_lossy().to_string())
+            .map(PathBuf::from)
+            .or(Ok(absolute))
     }
 }
 
@@ -399,6 +457,55 @@ impl Tool for BashTool {
             return Err(format!("Execution failed: working directory is not a directory: {}", work_dir));
         }
 
+        // Use sandbox-exec on macOS if sandbox is enabled
+        #[cfg(target_os = "macos")]
+        {
+            if self.sandbox.enabled {
+                let resolved = self.resolve_working_dir(&work_dir)?;
+                let resolved_str = resolved.to_string_lossy().to_string();
+                let profile = self.generate_sandbox_profile(&resolved_str);
+
+                let output = tokio::time::timeout(
+                    std::time::Duration::from_secs_f64(timeout_secs),
+                    tokio::process::Command::new("sandbox-exec")
+                        .arg("-p")
+                        .arg(&profile)
+                        .arg("bash")
+                        .arg("-c")
+                        .arg(command)
+                        .current_dir(work_path)
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped())
+                        .stdin(Stdio::null())
+                        .output(),
+                )
+                .await
+                .map_err(|_| {
+                    format!("Execution failed: Command timed out after {} milliseconds", timeout_ms)
+                })?
+                .map_err(|e| format!("Execution failed: {}", e))?;
+
+                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                let exit_code = output.status.code().unwrap_or(-1);
+
+                let result = if stderr.is_empty() {
+                    format!(
+                        "Command: {}\nExit code: {}\nSTDOUT:\n{}",
+                        command, exit_code, stdout
+                    )
+                } else {
+                    format!(
+                        "Command: {}\nExit code: {}\nSTDOUT:\n{}\nSTDERR:\n{}",
+                        command, exit_code, stdout, stderr
+                    )
+                };
+
+                return Ok(result);
+            }
+        }
+
+        // Without sandbox (or non-macOS): run bash directly
         let output = tokio::time::timeout(
             std::time::Duration::from_secs_f64(timeout_secs),
             tokio::process::Command::new("bash")

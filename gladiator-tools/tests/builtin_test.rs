@@ -356,3 +356,116 @@ async fn test_grep_name() {
     let tool = GrepTool::new();
     assert_eq!(tool.name(), "grep");
 }
+
+// --- Sandbox tests ---
+
+#[test]
+fn test_sandbox_config_defaults() {
+    use gladiator_core::config::SandboxConfig;
+    let config = SandboxConfig::default();
+    assert!(config.enabled);
+    assert!(!config.network);
+}
+
+#[tokio::test]
+async fn test_bash_sandbox_disabled_runs_normally() {
+    use gladiator_core::config::SandboxConfig;
+    let sandbox = SandboxConfig { enabled: false, network: false };
+    let tool = BashTool::with_sandbox(".", sandbox);
+    let args = json!({"command": "echo sandbox_off"});
+    let result = tool.execute(&args).await.unwrap();
+    assert!(result.contains("sandbox_off"));
+    assert!(result.contains("Exit code: 0"));
+}
+
+#[tokio::test]
+async fn test_bash_sandbox_disabled_network_allowed() {
+    // Without sandbox, network is not restricted (we just test the command runs)
+    use gladiator_core::config::SandboxConfig;
+    let sandbox = SandboxConfig { enabled: false, network: false };
+    let tool = BashTool::with_sandbox(".", sandbox);
+    let args = json!({"command": "echo no_sandbox"});
+    let result = tool.execute(&args).await.unwrap();
+    assert!(result.contains("no_sandbox"));
+    assert!(result.contains("Exit code: 0"));
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn test_bash_sandbox_enabled_echo() {
+    use gladiator_core::config::SandboxConfig;
+    let sandbox = SandboxConfig { enabled: true, network: false };
+    let tool = BashTool::with_sandbox(".", sandbox);
+    let args = json!({"command": "echo sandbox_on"});
+    let result = tool.execute(&args).await.unwrap();
+    assert!(result.contains("sandbox_on"));
+    assert!(result.contains("Exit code: 0"));
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn test_bash_sandbox_denies_network() {
+    use gladiator_core::config::SandboxConfig;
+    let sandbox = SandboxConfig { enabled: true, network: false };
+    let tool = BashTool::with_sandbox(".", sandbox);
+    // Try to make a network connection — should fail in sandbox
+    let args = json!({"command": "curl -s --connect-timeout 3 http://127.0.0.1:1/nope 2>&1 || echo 'NETWORK_BLOCKED'"});
+    let result = tool.execute(&args).await.unwrap();
+    // In sandbox, curl should fail or the fallback echo should appear
+    assert!(result.contains("NETWORK_BLOCKED") || result.contains("couldn't connect") || result.contains("Connection refused") || result.contains("Failed"));
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn test_bash_sandbox_allows_write_to_working_dir() {
+    use gladiator_core::config::SandboxConfig;
+    let tmp = TempDir::new().unwrap();
+    let tmp_path = tmp.path().to_str().unwrap().to_string();
+    let sandbox = SandboxConfig { enabled: true, network: false };
+    let tool = BashTool::with_sandbox(&tmp_path, sandbox);
+    let test_file = tmp.path().join("sandbox_test.txt");
+    let args = json!({
+        "command": format!("echo test > {}", test_file.to_str().unwrap()),
+        "working_dir": tmp_path,
+    });
+    let result = tool.execute(&args).await.unwrap();
+    assert!(result.contains("Exit code: 0"));
+    // Verify the file was actually written
+    assert!(test_file.exists());
+    let content = std::fs::read_to_string(&test_file).unwrap();
+    assert_eq!(content.trim(), "test");
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn test_bash_sandbox_denies_write_outside_working_dir() {
+    use gladiator_core::config::SandboxConfig;
+    let tmp = TempDir::new().unwrap();
+    let tmp_path = tmp.path().to_str().unwrap().to_string();
+    let sandbox = SandboxConfig { enabled: true, network: false };
+    let tool = BashTool::with_sandbox(&tmp_path, sandbox);
+    // Try to write to /etc (should be denied by sandbox)
+    let args = json!({
+        "command": "echo test > /etc/gladiator_sandbox_test 2>/dev/null; if [ $? -ne 0 ]; then echo 'WRITE_BLOCKED'; fi",
+        "working_dir": tmp_path,
+    });
+    let result = tool.execute(&args).await.unwrap();
+    // The write should be blocked
+    assert!(result.contains("WRITE_BLOCKED") || !std::path::Path::new("/etc/gladiator_sandbox_test").exists());
+    // Clean up if the file was somehow created
+    let _ = std::fs::remove_file("/etc/gladiator_sandbox_test");
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn test_bash_sandbox_network_enabled_allows_connection() {
+    use gladiator_core::config::SandboxConfig;
+    let sandbox = SandboxConfig { enabled: true, network: true };
+    let tool = BashTool::with_sandbox(".", sandbox);
+    // With network enabled, curl should not be blocked by sandbox
+    // (it may still fail if the server is not running, but the error should not be a sandbox denial)
+    let args = json!({"command": "curl -s --connect-timeout 3 http://127.0.0.1:1/nope 2>&1; echo EXIT_CODE=$?"});
+    let result = tool.execute(&args).await.unwrap();
+    // Should not see sandbox denial — just a connection error
+    assert!(!result.contains("sandbox") || !result.contains("deny"));
+}

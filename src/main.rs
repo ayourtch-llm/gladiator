@@ -127,7 +127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut registry = ToolRegistry::new();
     let working_dir = config.agent.working_dir.clone();
     if config.tools.bash {
-        registry.add(Box::new(BashTool::with_working_dir(&working_dir)));
+        registry.add(Box::new(BashTool::with_sandbox(&working_dir, config.tools.sandbox.clone())));
     }
     if config.tools.read {
         registry.add(Box::new(ReadFileTool::with_working_dir(&working_dir)));
