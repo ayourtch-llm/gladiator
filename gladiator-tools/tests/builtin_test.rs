@@ -469,3 +469,128 @@ async fn test_bash_sandbox_network_enabled_allows_connection() {
     // Should not see sandbox denial — just a connection error
     assert!(!result.contains("sandbox") || !result.contains("deny"));
 }
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn test_bash_sandbox_rustc_version() {
+    use gladiator_core::config::SandboxConfig;
+    let sandbox = SandboxConfig { enabled: true, network: false };
+    let tool = BashTool::with_sandbox(".", sandbox);
+    let args = json!({"command": "rustc --version"});
+    let result = tool.execute(&args).await.unwrap();
+    assert!(result.contains("Exit code: 0"), "Expected exit code 0, got: {}", result);
+    assert!(result.contains("rustc"), "Expected rustc output, got: {}", result);
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn test_bash_sandbox_cargo_version() {
+    use gladiator_core::config::SandboxConfig;
+    let sandbox = SandboxConfig { enabled: true, network: false };
+    let tool = BashTool::with_sandbox(".", sandbox);
+    let args = json!({"command": "cargo --version"});
+    let result = tool.execute(&args).await.unwrap();
+    assert!(result.contains("Exit code: 0"), "Expected exit code 0, got: {}", result);
+    assert!(result.contains("cargo"), "Expected cargo output, got: {}", result);
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn test_bash_sandbox_cargo_build() {
+    use gladiator_core::config::SandboxConfig;
+    let tmp = TempDir::new().unwrap();
+    let tmp_path = tmp.path().to_str().unwrap().to_string();
+
+    // Create a minimal Rust project
+    std::fs::write(
+        tmp.path().join("Cargo.toml"),
+        "[package]\nname = \"sandbox_test\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n",
+    ).unwrap();
+    std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+    std::fs::write(
+        tmp.path().join("src").join("main.rs"),
+        "fn main() { println!(\"hello from sandbox\"); }\n",
+    ).unwrap();
+
+    let sandbox = SandboxConfig { enabled: true, network: false };
+    let tool = BashTool::with_sandbox(&tmp_path, sandbox);
+    let args = json!({
+        "command": "cargo build 2>&1",
+        "working_dir": tmp_path,
+    });
+    let result = tool.execute(&args).await.unwrap();
+    assert!(
+        result.contains("Exit code: 0"),
+        "Expected exit code 0, got: {}",
+        result
+    );
+    assert!(
+        result.contains("Finished") || result.contains("Compiling"),
+        "Expected build output, got: {}",
+        result
+    );
+
+    // Verify the binary runs
+    let bin_path = tmp.path().join("target").join("debug").join("sandbox_test");
+    assert!(bin_path.exists(), "Binary not found at {:?}", bin_path);
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn test_bash_sandbox_cargo_test() {
+    use gladiator_core::config::SandboxConfig;
+    let tmp = TempDir::new().unwrap();
+    let tmp_path = tmp.path().to_str().unwrap().to_string();
+
+    // Create a minimal Rust project with a test
+    std::fs::write(
+        tmp.path().join("Cargo.toml"),
+        "[package]\nname = \"sandbox_test2\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n",
+    ).unwrap();
+    std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+    std::fs::write(
+        tmp.path().join("src").join("main.rs"),
+        "fn main() { println!(\"hello\"); }\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn test_basic() {\n        assert_eq!(2 + 2, 4);\n    }\n}\n",
+    ).unwrap();
+
+    let sandbox = SandboxConfig { enabled: true, network: false };
+    let tool = BashTool::with_sandbox(&tmp_path, sandbox);
+    let args = json!({
+        "command": "cargo test 2>&1",
+        "working_dir": tmp_path,
+    });
+    let result = tool.execute(&args).await.unwrap();
+    assert!(
+        result.contains("Exit code: 0"),
+        "Expected exit code 0, got: {}",
+        result
+    );
+    assert!(
+        result.contains("test_basic") && result.contains("passed"),
+        "Expected test output, got: {}",
+        result
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn test_bash_sandbox_write_block_still_enforced() {
+    use gladiator_core::config::SandboxConfig;
+    let tmp = TempDir::new().unwrap();
+    let tmp_path = tmp.path().to_str().unwrap().to_string();
+    let sandbox = SandboxConfig { enabled: true, network: false };
+    let tool = BashTool::with_sandbox(&tmp_path, sandbox);
+
+    // Even with syscall/mach allows, file-write to /etc should still be denied
+    let args = json!({
+        "command": "echo test > /etc/gladiator_sandbox_test2 2>/dev/null; if [ $? -ne 0 ]; then echo 'WRITE_BLOCKED'; fi",
+        "working_dir": tmp_path,
+    });
+    let result = tool.execute(&args).await.unwrap();
+    assert!(
+        result.contains("WRITE_BLOCKED"),
+        "Expected write to be blocked, got: {}",
+        result
+    );
+    let _ = std::fs::remove_file("/etc/gladiator_sandbox_test2");
+}

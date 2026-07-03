@@ -331,14 +331,31 @@ impl BashTool {
     }
 
     /// Generate a macOS sandbox-exec profile string.
-    /// Allows reading any file, executing processes, and writing to the working dir and /tmp.
-    /// Denies network access unless `allow_network` is true.
+    ///
+    /// The sandbox denies by default: anything not explicitly allowed is denied.
+    /// We allow:
+    /// - process* : fork/exec
+    /// - syscall* : mmap, mprotect, munmap, sigaction, etc. (needed for Rust runtime)
+    /// - mach* : Mach IPC (needed for dyld, IPC)
+    /// - system* : system-wide syscalls (fcntl, etc.)
+    /// - signal : signal handling
+    /// - ipc* : IPC (shared memory, semaphores)
+    /// - sysctl* : kernel info queries
+    /// - file-read* : read any file
+    /// - file-write* to working dir and /tmp variants : write to allowed paths
+    /// Then deny file-write* and network* (if !network) to block everything else.
     fn generate_sandbox_profile(&self, working_dir: &str) -> String {
         let mut profile = "(version 1)\n".to_string();
         if !self.sandbox.network {
             profile.push_str("(deny network*)\n");
         }
         profile.push_str("(allow process*)\n");
+        profile.push_str("(allow syscall*)\n");
+        profile.push_str("(allow mach*)\n");
+        profile.push_str("(allow system*)\n");
+        profile.push_str("(allow signal)\n");
+        profile.push_str("(allow ipc*)\n");
+        profile.push_str("(allow sysctl*)\n");
         profile.push_str("(allow file-read*)\n");
         // Allow writing to common temp directories
         for tmp_path in &["/tmp", "/private/tmp", "/var/tmp"] {
@@ -465,19 +482,23 @@ impl Tool for BashTool {
                 let resolved_str = resolved.to_string_lossy().to_string();
                 let profile = self.generate_sandbox_profile(&resolved_str);
 
+                // Set TMPDIR to /private/tmp so rustc/cargo can create temp files
+                // (the sandbox allows writes to /private/tmp but not the default $TMPDIR)
+                let mut cmd = tokio::process::Command::new("sandbox-exec");
+                cmd.arg("-p")
+                    .arg(&profile)
+                    .arg("bash")
+                    .arg("-c")
+                    .arg(command)
+                    .current_dir(work_path)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .stdin(Stdio::null())
+                    .env("TMPDIR", "/private/tmp");
+
                 let output = tokio::time::timeout(
                     std::time::Duration::from_secs_f64(timeout_secs),
-                    tokio::process::Command::new("sandbox-exec")
-                        .arg("-p")
-                        .arg(&profile)
-                        .arg("bash")
-                        .arg("-c")
-                        .arg(command)
-                        .current_dir(work_path)
-                        .stdout(Stdio::piped())
-                        .stderr(Stdio::piped())
-                        .stdin(Stdio::null())
-                        .output(),
+                    cmd.output(),
                 )
                 .await
                 .map_err(|_| {
