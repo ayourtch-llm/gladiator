@@ -3,6 +3,7 @@ use gladiator_core::config::Config;
 use gladiator_core::{Bus, Message};
 use gladiator_llm::LlmActor;
 use gladiator_server::run_server;
+use gladiator_tools::builtin::{BashTool, EditFileTool, GlobTool, GrepTool, ReadFileTool, WriteFileTool};
 use gladiator_tools::{ToolActorRunner, ToolRegistry};
 use std::path::PathBuf;
 use clap::Parser;
@@ -81,6 +82,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let config = if let Some(path) = &cli.config {
         Config::from_file(path)?
+    } else if std::path::Path::new("gladiator.toml").exists() {
+        Config::from_file(std::path::Path::new("gladiator.toml"))?
     } else {
         Config::default()
     };
@@ -97,10 +100,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let bus = Bus::new();
     setup_topics(&bus, &config).await;
 
-    // Build tool registry
+    // Build tool registry — register built-in tools based on ToolsConfig toggles
     let mut registry = ToolRegistry::new();
+    let working_dir = config.agent.working_dir.clone();
+    if config.tools.bash {
+        registry.add(Box::new(BashTool::with_working_dir(&working_dir)));
+    }
+    if config.tools.read {
+        registry.add(Box::new(ReadFileTool::with_working_dir(&working_dir)));
+    }
+    if config.tools.write {
+        registry.add(Box::new(WriteFileTool::with_working_dir(&working_dir)));
+    }
+    if config.tools.edit {
+        registry.add(Box::new(EditFileTool::with_working_dir(&working_dir)));
+    }
+    if config.tools.glob {
+        registry.add(Box::new(GlobTool::with_working_dir(&working_dir)));
+    }
+    if config.tools.grep {
+        registry.add(Box::new(GrepTool::with_working_dir(&working_dir)));
+    }
+    tracing::info!("Built-in tools registered: {} tools", registry.len());
+
+    // Spawn MCP tool servers and add their tools to the registry
     let _mcp_handles = spawn_mcp_servers(&bus, &config, &mut registry).await;
-    tracing::info!("Tool registry: {} tools", registry.len());
+    tracing::info!("Tool registry (with MCP): {} tools", registry.len());
 
     // Create and spawn LLM actor
     let llm_actor = LlmActor::new(
@@ -177,6 +202,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let agent_in_topic = config.topics.agent_in.clone();
         tokio::spawn(async move {
             while let Some(text) = user_input_rx.recv().await {
+                tracing::info!(target: "gladiator", "User input published to {}: {}", agent_in_topic, text);
                 let msg = Message::new(&agent_in_topic, "gladiator-tui", text)
                     .with_type("UserInput");
                 if let Err(e) = bus_clone.publish("gladiator-tui", msg).await {
@@ -186,7 +212,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         });
 
         // Run TUI app
-        match gladiator_tui::app::run_app(bus.clone(), user_input_tx).await {
+        match gladiator_tui::app::run_app(bus.clone(), user_input_tx, &config.topics).await {
             Ok(()) => {}
             Err(e) => tracing::error!("TUI error: {}", e),
         }

@@ -3,6 +3,7 @@ use crate::state::{AppMessage, ChatState, InputState, ScrollState};
 use crate::theme::Theme;
 use crate::render::Renderer;
 use gladiator_core::bus::Bus;
+use gladiator_core::config::TopicsConfig;
 use gladiator_core::message::Message;
 use std::io;
 use std::time::Duration;
@@ -13,6 +14,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
+use tracing::debug;
 
 pub struct App {
     chat: ChatState,
@@ -152,29 +154,32 @@ impl App {
 pub async fn run_app(
     bus: Bus,
     user_input_tx: mpsc::UnboundedSender<String>,
+    topics: &TopicsConfig,
 ) -> io::Result<()> {
     let theme = Theme::default_dark();
     let mut app = App::new(theme);
 
-    // Subscribe to relevant topics
-    let topics = vec![
-        "llm-stream",
-        "llm-stream-end",
-        "llm-thinking",
-        "llm-tool",
-        "llm-dump",
-        "user-input",
-        "error",
-        "info",
-        "agent-status",
+    // Subscribe to the correct bus topics.
+    // agent:stream — agent forwards LLM stream output, tool results, and warnings here
+    // llm:tool_calls — LLM tool call notifications (which tools the LLM is invoking)
+    // llm:stats — stream statistics (token/char counts)
+    let topic_names = vec![
+        topics.agent_stream.clone(),
+        topics.llm_tool_calls.clone(),
+        topics.llm_stats.clone(),
     ];
 
     let mut rx_handles = Vec::new();
-    for topic in &topics {
-        // Use subscribe_stream for external (non-actor) subscription
+    for topic in &topic_names {
+        debug!(target: "gladiator-tui", "Subscribing to topic: {}", topic);
         match bus.subscribe_stream(topic).await {
-            Ok(rx) => rx_handles.push((topic.to_string(), rx)),
-            Err(_) => {}
+            Ok(rx) => {
+                debug!(target: "gladiator-tui", "Subscribed to topic: {}", topic);
+                rx_handles.push((topic.clone(), rx));
+            }
+            Err(e) => {
+                tracing::warn!(target: "gladiator-tui", "Failed to subscribe to {}: {:?}", topic, e);
+            }
         }
     }
 
@@ -205,8 +210,16 @@ pub async fn run_app(
         app.render_frame(&mut terminal);
 
         // Check for bus messages (non-blocking)
-        for (_, rx) in rx_handles.iter_mut() {
+        for (topic, rx) in rx_handles.iter_mut() {
             while let Ok(msg) = rx.try_recv() {
+                let msg_type = msg.meta_type().unwrap_or_default().to_string();
+                let payload_preview = msg.payload_str().unwrap_or_default();
+                let preview = if payload_preview.len() > 80 {
+                    format!("{}...", &payload_preview[..80])
+                } else {
+                    payload_preview
+                };
+                debug!(target: "gladiator-tui", "Received on '{}': type={} payload={}", topic, msg_type, preview);
                 app.handle_bus_message(&msg);
             }
         }

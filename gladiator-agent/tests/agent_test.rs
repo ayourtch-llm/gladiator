@@ -1,6 +1,5 @@
 use gladiator_core::*;
 use gladiator_agent::*;
-use async_trait::async_trait;
 
 // =========================================================================
 // AgentActor construction tests

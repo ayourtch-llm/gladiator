@@ -240,7 +240,7 @@ fn default_llm_model() -> String {
     "gpt-4o-mini".to_string()
 }
 fn default_llm_base_url() -> String {
-    "http://localhost:8000/v1".to_string()
+    "http://ts-agent-gateway:4000/v1".to_string()
 }
 fn default_llm_api_key() -> String {
     String::new()

@@ -3,7 +3,7 @@ use gladiator_core::{Actor, ActorAnnouncement, AgentConfig, Bus, Message};
 use gladiator_llm::LlmRequest;
 use std::sync::Arc;
 use tokio::sync::broadcast::error::RecvError;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Default)]
 pub struct AgentActor {
@@ -159,6 +159,7 @@ impl Actor for AgentActor {
                     match result {
                         Ok(msg) => {
                             let user_message = msg.payload_str().unwrap_or_else(|| msg.payload.to_string());
+                            info!("Agent {} received user input: {}", self.index, user_message);
 
                             {
                                 let mut s = state.lock().await;
@@ -198,6 +199,10 @@ impl Actor for AgentActor {
                 result = stream_rx.recv() => {
                     match result {
                         Ok(msg) => {
+                            let msg_type = msg.meta_type().unwrap_or_default().to_string();
+                            let preview = msg.payload_str().unwrap_or_default();
+                            let preview = if preview.len() > 60 { format!("{}...", &preview[..60]) } else { preview };
+                            debug!("Agent {} forwarding stream ({}) to {}: {}", self.index, msg_type, self.stream_output_topic, preview);
                             let mut forwarded = msg.clone();
                             forwarded.topic = self.stream_output_topic.clone();
                             let _ = bus.publish(&self.id(), forwarded).await;

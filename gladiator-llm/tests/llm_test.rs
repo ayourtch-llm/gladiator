@@ -1,6 +1,5 @@
 use gladiator_core::*;
 use gladiator_llm::*;
-use async_trait::async_trait;
 
 // =========================================================================
 // LlmRequest tests
