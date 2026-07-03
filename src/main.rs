@@ -71,13 +71,6 @@ async fn spawn_mcp_servers(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
-        )
-        .init();
-
     let cli = Cli::parse();
 
     let config = if let Some(path) = &cli.config {
@@ -91,6 +84,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let host = cli.host.clone();
     let port = cli.port;
     let no_tui = cli.no_tui;
+
+    // In TUI mode, redirect tracing to a file so it doesn't corrupt the terminal.
+    // In headless mode, use stderr as normal.
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "info".into());
+    if !no_tui {
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open("gladiator.log")
+        {
+            Ok(log_file) => {
+                let log_writer = std::sync::Arc::new(log_file);
+                tracing_subscriber::fmt()
+                    .with_env_filter(env_filter)
+                    .with_writer(log_writer)
+                    .init();
+            }
+            Err(_) => {
+                tracing_subscriber::fmt()
+                    .with_env_filter(env_filter)
+                    .init();
+            }
+        }
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter)
+            .init();
+    }
 
     tracing::info!("Starting gladiator...");
     tracing::info!("LLM model: {}", config.llm.model);

@@ -174,6 +174,15 @@ impl Actor for AgentActor {
                                 let s = state.lock().await;
                                 s.build_messages_with_system(&self.system_message)
                             };
+
+                            // Publish status to TUI
+                            let status_msg = Message::new(
+                                &self.stream_output_topic,
+                                &self.id(),
+                                "Sending request to LLM...",
+                            ).with_type("Info");
+                            let _ = bus.publish(&self.id(), status_msg).await;
+
                             if let Err(e) = self.send_conversation(bus, &messages).await {
                                 error!("Failed to send conversation: {}", e);
                             }
@@ -186,6 +195,7 @@ impl Actor for AgentActor {
                     match result {
                         Ok(msg) => {
                             let output = msg.payload_str().unwrap_or_else(|| msg.payload.to_string());
+                            debug!("Agent {} received LLM output: {}", self.index, output);
                             {
                                 let mut s = state.lock().await;
                                 s.add_assistant_message(output);
@@ -242,6 +252,14 @@ impl Actor for AgentActor {
                                 };
 
                                 info!("Agent {} dispatching tool call: {}({})", self.index, func_name, func_args_str);
+
+                                // Publish tool call status to TUI
+                                let tool_status = Message::new(
+                                    &self.stream_output_topic,
+                                    &self.id(),
+                                    format!("Calling tool: {}({})", func_name, func_args_str),
+                                ).with_type("Info");
+                                let _ = bus.publish(&self.id(), tool_status).await;
 
                                 let exec_payload = serde_json::json!({
                                     "tool_call_id": tool_call_id,

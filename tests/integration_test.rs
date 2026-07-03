@@ -93,19 +93,25 @@ async fn test_agent_text_roundtrip() {
     let response_msg = Message::new(llm_out, "mock-llm", "Hello from mock LLM!");
     bus.publish("mock-llm", response_msg).await.unwrap();
 
-    // Wait for the agent to forward the stream to agent_stream
-    let stream_out = timeout(Duration::from_secs(5), stream_rx.recv())
-        .await
-        .expect("timed out waiting for stream output")
-        .expect("broadcast closed");
-
-    // The agent forwards llm_stream messages to agent_stream
-    let payload = stream_out.payload_str().unwrap_or_default();
-    assert!(
-        payload.contains("Hello from mock LLM!"),
-        "expected LLM response in stream, got: {}",
-        payload
-    );
+    // Wait for the agent to forward the stream to agent_stream.
+    // The agent now also publishes "Info" status messages, so we loop
+    // until we find the actual LLM stream content.
+    let mut found_stream = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        match timeout(Duration::from_secs(2), stream_rx.recv()).await {
+            Ok(Ok(msg)) => {
+                let payload = msg.payload_str().unwrap_or_default();
+                if payload.contains("Hello from mock LLM!") {
+                    found_stream = true;
+                    break;
+                }
+                // Skip Info/status messages
+            }
+            _ => break,
+        }
+    }
+    assert!(found_stream, "expected LLM response in agent_stream");
 
     // Cleanup
     agent_handle.stop().await;

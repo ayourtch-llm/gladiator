@@ -6,6 +6,69 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
+/// Word-wrap text into lines at the given widths.
+/// `first_width` is the available width for the first line (after prefix).
+/// `cont_width` is the available width for continuation lines.
+/// Returns a Vec of wrapped line strings (without prefix).
+fn wrap_text(content: &str, first_width: usize, cont_width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut current_len = 0usize;
+
+    for word in content.split_whitespace() {
+        let avail = if lines.is_empty() {
+            first_width
+        } else {
+            cont_width
+        };
+        let word_len = word.chars().count();
+
+        if current.is_empty() {
+            if word_len > avail && avail > 0 {
+                let mut remaining: Vec<char> = word.chars().collect();
+                while !remaining.is_empty() {
+                    let avail = if lines.is_empty() {
+                        first_width
+                    } else {
+                        cont_width
+                    };
+                    let take: String = remaining.iter().take(avail).collect();
+                    let take_len = take.chars().count();
+                    lines.push(take);
+                    remaining.drain(0..take_len.min(remaining.len()));
+                }
+            } else {
+                current = word.to_string();
+                current_len = word_len;
+            }
+        } else if current_len + 1 + word_len > avail {
+            lines.push(std::mem::take(&mut current));
+            if word_len > cont_width && cont_width > 0 {
+                let mut remaining: Vec<char> = word.chars().collect();
+                while !remaining.is_empty() {
+                    let take: String = remaining.iter().take(cont_width).collect();
+                    let take_len = take.chars().count();
+                    lines.push(take);
+                    remaining.drain(0..take_len.min(remaining.len()));
+                }
+            } else {
+                current = word.to_string();
+                current_len = word_len;
+            }
+        } else {
+            current.push(' ');
+            current.push_str(word);
+            current_len += 1 + word_len;
+        }
+    }
+
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current);
+    }
+
+    lines
+}
+
 pub struct Renderer {
     theme: Theme,
 }
@@ -75,71 +138,71 @@ impl Renderer {
 
         let messages = chat.messages();
         let visible_height = area.height as usize;
-        let total = messages.len();
+        let width = area.width as usize;
 
-        let offset = if total > visible_height {
-            scroll.offset().min(total.saturating_sub(visible_height))
+        // Build a flat list of visual lines by wrapping each message
+        let mut all_visual_lines: Vec<Line> = Vec::new();
+        for msg in messages {
+            let lines = self.message_to_visual_lines(msg, width);
+            all_visual_lines.extend(lines);
+        }
+
+        let total_lines = all_visual_lines.len();
+        let offset = if total_lines > visible_height {
+            scroll.offset().min(total_lines.saturating_sub(visible_height))
         } else {
             0
         };
 
-        let lines: Vec<Line> = messages
-            .iter()
+        let visible: Vec<Line> = all_visual_lines
+            .into_iter()
             .skip(offset)
             .take(visible_height)
-            .map(|msg| self.message_to_line(msg))
             .collect();
 
-        let para = Paragraph::new(lines).block(block);
+        let para = Paragraph::new(visible).block(block);
         frame.render_widget(para, area);
     }
 
-    fn message_to_line<'a>(&self, msg: &'a AppMessage) -> Line<'a> {
+    fn message_to_visual_lines(&self, msg: &AppMessage, width: usize) -> Vec<Line<'_>> {
         let (prefix, prefix_color, text_color) = match msg.role {
-            AppMessageRole::User => (
-                ">",
-                self.theme.color_secondary(),
-                self.theme.color_text(),
-            ),
-            AppMessageRole::Assistant => (
-                "",
-                self.theme.color_primary(),
-                self.theme.color_text(),
-            ),
-            AppMessageRole::Tool => (
-                "[tool]",
-                self.theme.color_info(),
-                self.theme.color_info(),
-            ),
-            AppMessageRole::Error => (
-                "[!]",
-                self.theme.color_error(),
-                self.theme.color_error(),
-            ),
-            AppMessageRole::Info => (
-                "[i]",
-                self.theme.color_info(),
-                self.theme.color_text_muted(),
-            ),
-            AppMessageRole::System => (
-                "[sys]",
-                self.theme.color_text_muted(),
-                self.theme.color_text_muted(),
-            ),
+            AppMessageRole::User => (">", self.theme.color_secondary(), self.theme.color_text()),
+            AppMessageRole::Assistant => ("", self.theme.color_primary(), self.theme.color_text()),
+            AppMessageRole::Tool => ("[tool]", self.theme.color_info(), self.theme.color_info()),
+            AppMessageRole::Error => ("[!]", self.theme.color_error(), self.theme.color_error()),
+            AppMessageRole::Info => ("[i]", self.theme.color_info(), self.theme.color_text_muted()),
+            AppMessageRole::System => ("[sys]", self.theme.color_text_muted(), self.theme.color_text_muted()),
         };
 
-        let mut spans = Vec::new();
-        if !prefix.is_empty() {
-            spans.push(Span::styled(
-                format!("{} ", prefix),
-                Style::default().fg(prefix_color),
-            ));
+        let prefix_str = if !prefix.is_empty() {
+            format!("{} ", prefix)
+        } else {
+            String::new()
+        };
+        let prefix_len = prefix_str.chars().count();
+        let first_line_width = width.saturating_sub(prefix_len).max(1);
+        let cont_width = width.max(1);
+
+        let wrapped = wrap_text(&msg.content, first_line_width, cont_width);
+        let mut lines: Vec<Line> = Vec::new();
+
+        for (i, text) in wrapped.into_iter().enumerate() {
+            let mut spans: Vec<Span> = Vec::new();
+            if i == 0 && !prefix_str.is_empty() {
+                spans.push(Span::styled(prefix_str.clone(), Style::default().fg(prefix_color)));
+            }
+            spans.push(Span::styled(text, Style::default().fg(text_color)));
+            lines.push(Line::from(spans));
         }
-        spans.push(Span::styled(
-            msg.content.as_str(),
-            Style::default().fg(text_color),
-        ));
-        Line::from(spans)
+
+        if lines.is_empty() {
+            lines.push(Line::from(vec![Span::styled(
+                prefix_str,
+                Style::default().fg(prefix_color),
+            )]));
+        }
+
+        lines
     }
 
     fn render_input(&self, frame: &mut Frame, area: Rect, input: &InputState) {
