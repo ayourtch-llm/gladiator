@@ -196,12 +196,12 @@ impl Bus {
             }
         }
 
-        let mut subscribers = self.topic_subscribers.write().await;
-        if let Some(subs) = subscribers.get_mut(topic) {
-            subs.remove(actor_id);
-        }
-
-        if !is_subscription {
+        if is_subscription {
+            let mut subscribers = self.topic_subscribers.write().await;
+            if let Some(subs) = subscribers.get_mut(topic) {
+                subs.remove(actor_id);
+            }
+        } else {
             let mut publishers = self.topic_publishers.write().await;
             if let Some(pubs) = publishers.get_mut(topic) {
                 pubs.remove(actor_id);

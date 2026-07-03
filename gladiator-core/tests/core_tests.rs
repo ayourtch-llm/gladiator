@@ -117,6 +117,46 @@ async fn bus_spawn_actor() {
     handle.stop().await;
 }
 
+#[tokio::test]
+async fn bus_unregister_actor_preserves_subscribers() {
+    let bus = Bus::new();
+    bus.create_topic("test:unreg", 100).await;
+    bus.register_announcement(ActorAnnouncement {
+        id: "sub-a".to_string(),
+        subscriptions: vec!["test:unreg".to_string()],
+        publications: vec![],
+    })
+    .await;
+    bus.register_announcement(ActorAnnouncement {
+        id: "pub-b".to_string(),
+        subscriptions: vec![],
+        publications: vec!["test:unreg".to_string()],
+    })
+    .await;
+
+    bus.register_actor("sub-a", "test:unreg", true).await;
+    bus.register_actor("pub-b", "test:unreg", false).await;
+
+    let info = bus.list_topic_info().await;
+    let topic_info = info.iter().find(|t| t.name == "test:unreg").unwrap();
+    assert!(topic_info.subscribers.contains(&"sub-a".to_string()));
+    assert!(topic_info.publishers.contains(&"pub-b".to_string()));
+
+    // Unregister pub-b as a publisher — should NOT remove sub-a from subscribers
+    bus.unregister_actor("pub-b", "test:unreg", false).await;
+
+    let info = bus.list_topic_info().await;
+    let topic_info = info.iter().find(|t| t.name == "test:unreg").unwrap();
+    assert!(
+        topic_info.subscribers.contains(&"sub-a".to_string()),
+        "sub-a should still be subscribed after unregistering pub-b"
+    );
+    assert!(
+        !topic_info.publishers.contains(&"pub-b".to_string()),
+        "pub-b should be removed from publishers"
+    );
+}
+
 // =========================================================================
 // Message tests
 // =========================================================================
@@ -146,6 +186,15 @@ fn message_text() {
 fn message_with_type() {
     let msg = Message::text("t", "s", "body").with_type("LlmStream");
     assert_eq!(msg.meta, serde_json::json!({"type": "LlmStream"}));
+}
+
+#[test]
+fn message_with_type_after_stream_id_preserves_stream_id() {
+    let msg = Message::text("t", "s", "body")
+        .with_stream_id("abc-123".to_string())
+        .with_type("LlmStream");
+    assert_eq!(msg.meta["type"], "LlmStream");
+    assert_eq!(msg.meta["stream_id"], "abc-123");
 }
 
 #[test]

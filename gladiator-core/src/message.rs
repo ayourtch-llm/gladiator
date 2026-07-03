@@ -94,7 +94,11 @@ impl Message {
     }
 
     pub fn with_type(mut self, item_type: impl Into<String>) -> Self {
-        self.meta = serde_json::json!({"type": item_type.into()});
+        if let serde_json::Value::Object(ref mut obj) = self.meta {
+            obj.insert("type".to_string(), serde_json::Value::String(item_type.into().to_string()));
+        } else {
+            self.meta = serde_json::json!({"type": item_type.into().to_string()});
+        }
         self
     }
 
