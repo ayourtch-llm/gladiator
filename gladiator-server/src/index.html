@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>gladiator - debug dashboard</title>
+    <style>
+        body { background: #0a0a0a; color: #eeeeee; font-family: monospace; margin: 0; padding: 20px; }
+        h1 { color: #fab283; }
+        h2 { color: #5c9cf5; margin-top: 20px; }
+        .panel { background: #141414; border: 1px solid #484848; border-radius: 4px; padding: 12px; margin-bottom: 16px; }
+        .actor { padding: 8px; border-bottom: 1px solid #3c3c3c; }
+        .actor-id { color: #fab283; font-weight: bold; }
+        .topic { padding: 8px; border-bottom: 1px solid #3c3c3c; }
+        .topic-name { color: #56b6c2; font-weight: bold; }
+        .subs { color: #7fd88f; }
+        .pubs { color: #9d7cd8; }
+        .stream-msg { padding: 4px 8px; border-bottom: 1px solid #1e1e1e; font-size: 12px; }
+        .stream-topic { color: #f5a742; }
+        button { background: #1e1e1e; color: #eeeeee; border: 1px solid #606060; padding: 6px 12px; cursor: pointer; }
+        button:hover { border-color: #fab283; }
+        .row { display: flex; gap: 20px; }
+        .col { flex: 1; }
+        #stream-log { max-height: 400px; overflow-y: auto; }
+    </style>
+</head>
+<body>
+    <h1>gladiator</h1>
+    <div class="row">
+        <div class="col">
+            <h2>Topics</h2>
+            <div class="panel" id="topics">Loading...</div>
+        </div>
+        <div class="col">
+            <h2>Actors</h2>
+            <div class="panel" id="actors">Loading...</div>
+        </div>
+    </div>
+    <h2>Message Stream</h2>
+    <div class="panel">
+        <input id="topic-input" value="llm-stream" placeholder="topic name">
+        <button onclick="startStream()">Connect</button>
+        <button onclick="clearLog()">Clear</button>
+        <div id="stream-log"></div>
+    </div>
+    <script>
+        async function refresh() {
+            try {
+                const topics = await fetch('/api/topics').then(r => r.json());
+                document.getElementById('topics').innerHTML = topics.map(t =>
+                    '<div class="topic"><span class="topic-name">' + t.name + '</span>' +
+                    ' <span class="subs">subs: ' + (t.subscribers||[]).join(', ') + '</span>' +
+                    ' <span class="pubs">pubs: ' + (t.publishers||[]).join(', ') + '</span></div>'
+                ).join('') || 'No topics';
+
+                const actors = await fetch('/api/actors').then(r => r.json());
+                document.getElementById('actors').innerHTML = actors.map(a =>
+                    '<div class="actor"><span class="actor-id">' + a.id + '</span>' +
+                    (a.announced ? ' (announced)' : '') + '<br>' +
+                    'subs: ' + (a.subscriptions||[]).join(', ') + '<br>' +
+                    'pubs: ' + (a.publications||[]).join(', ') + '</div>'
+                ).join('') || 'No actors';
+            } catch(e) { console.error(e); }
+        }
+        let es = null;
+        function startStream() {
+            if (es) es.close();
+            const topic = document.getElementById('topic-input').value;
+            es = new EventSource('/api/stream/' + encodeURIComponent(topic));
+            es.onmessage = function(e) {
+                const log = document.getElementById('stream-log');
+                const msg = document.createElement('div');
+                msg.className = 'stream-msg';
+                try {
+                    const data = JSON.parse(e.data);
+                    msg.innerHTML = '<span class="stream-topic">[' + data.topic + ']</span> ' +
+                        '<span style="color:#808080">' + data.source + '</span>: ' +
+                        (typeof data.payload === 'string' ? data.payload : JSON.stringify(data.payload));
+                } catch(_) {
+                    msg.textContent = e.data;
+                }
+                log.insertBefore(msg, log.firstChild);
+                while (log.childNodes.length > 100) log.removeChild(log.lastChild);
+            };
+        }
+        function clearLog() {
+            document.getElementById('stream-log').innerHTML = '';
+        }
+        refresh();
+        setInterval(refresh, 2000);
+    </script>
+</body>
+</html>
