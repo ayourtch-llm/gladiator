@@ -84,7 +84,7 @@ impl Renderer {
         self.render_header(frame, chunks[0]);
         self.render_messages(frame, chunks[1], chat, scroll);
         self.render_input(frame, chunks[2], input);
-        self.render_status_bar(frame, chunks[3], status_text);
+        self.render_status_bar(frame, chunks[3], status_text, scroll);
     }
 
     fn render_header(&self, frame: &mut Frame, area: Rect) {
@@ -146,6 +146,28 @@ impl Renderer {
 
         let para = Paragraph::new(visible).block(block);
         frame.render_widget(para, area);
+
+        // Scroll indicators: ↑ at top-right when scrolled up, ↓ at bottom-right when more below
+        let indicator_color = Style::default().fg(self.theme.color_text_muted());
+        if offset > 0 && total_lines > visible_height {
+            let top_right = Rect::new(area.right().saturating_sub(1), area.top(), 1, 1);
+            frame.render_widget(Paragraph::new(Line::from(vec![Span::styled(
+                "\u{2191}",
+                indicator_color,
+            )])), top_right);
+        }
+        if offset + visible_height < total_lines && total_lines > visible_height {
+            let bottom_right = Rect::new(
+                area.right().saturating_sub(1),
+                area.bottom().saturating_sub(1),
+                1,
+                1,
+            );
+            frame.render_widget(Paragraph::new(Line::from(vec![Span::styled(
+                "\u{2193}",
+                indicator_color,
+            )])), bottom_right);
+        }
     }
 
     fn message_to_visual_lines(&self, msg: &AppMessage, width: usize, h_offset: usize) -> Vec<Line<'_>> {
@@ -300,13 +322,45 @@ impl Renderer {
         frame.render_widget(para, area);
     }
 
-    fn render_status_bar(&self, frame: &mut Frame, area: Rect, status_text: &str) {
-        let para = Paragraph::new(status_text)
+    fn render_status_bar(&self, frame: &mut Frame, area: Rect, status_text: &str, scroll: &ScrollState) {
+        let total = scroll.total_lines();
+        let offset = scroll.offset();
+        let h = scroll.h_offset();
+        let visible = scroll.visible_height();
+
+        let mut right_info = String::new();
+        if total > visible && visible > 0 {
+            let end = (offset + visible).min(total);
+            right_info.push_str(&format!(" {}-{} of {}", offset + 1, end, total));
+        }
+        if h > 0 {
+            right_info.push_str(&format!("  \u{2190}{}", h));
+        }
+
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Min(1),
+                Constraint::Length(right_info.chars().count() as u16),
+            ])
+            .split(area);
+
+        let left = Paragraph::new(status_text)
             .style(
                 Style::default()
                     .fg(self.theme.color_text_muted())
                     .bg(self.theme.color_background_panel()),
             );
-        frame.render_widget(para, area);
+        frame.render_widget(left, chunks[0]);
+
+        if !right_info.is_empty() {
+            let right = Paragraph::new(right_info)
+                .style(
+                    Style::default()
+                        .fg(self.theme.color_info())
+                        .bg(self.theme.color_background_panel()),
+                );
+            frame.render_widget(right, chunks[1]);
+        }
     }
 }

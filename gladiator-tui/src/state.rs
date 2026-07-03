@@ -250,6 +250,14 @@ impl ScrollState {
         self.stick_to_bottom.get()
     }
 
+    pub fn total_lines(&self) -> usize {
+        self.total_lines.get()
+    }
+
+    pub fn visible_height(&self) -> usize {
+        self.visible_height.get()
+    }
+
     /// Set the visible height (called by renderer).
     pub fn set_visible_height(&self, h: usize) {
         self.visible_height.set(h);
