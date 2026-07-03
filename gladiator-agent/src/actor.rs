@@ -1,7 +1,7 @@
 use crate::state::ConversationState;
 use gladiator_core::{Actor, ActorAnnouncement, AgentConfig, Bus, Message};
-use gladiator_llm::{LlmRequest, merge_config};
-use std::sync::{Arc, Mutex as StdMutex};
+use gladiator_llm::LlmRequest;
+use std::sync::Arc;
 use tokio::sync::broadcast::error::RecvError;
 use tracing::{error, info, warn};
 

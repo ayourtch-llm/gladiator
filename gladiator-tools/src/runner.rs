@@ -16,6 +16,10 @@ impl ToolActorRunner {
         }
     }
 
+    pub fn from_arc(tool: std::sync::Arc<dyn Tool>) -> Self {
+        Self { tool }
+    }
+
     pub async fn run(&self, bus: &Bus) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let tool_name = self.tool.name().to_string();
         let execute_topic = format!("tool:{}:execute", tool_name);
