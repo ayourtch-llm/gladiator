@@ -299,8 +299,15 @@ impl Actor for AgentActor {
                                 s.increment_iteration();
                             }
 
-                            for tc in &tool_calls {
-                                let tool_call_id = tc["id"].as_str().unwrap_or("").to_string();
+                            for (i, tc) in tool_calls.iter().enumerate() {
+                                let tool_call_id = {
+                                    let raw = tc["id"].as_str().unwrap_or("");
+                                    if raw.is_empty() {
+                                        format!("__idx_{}", i)
+                                    } else {
+                                        raw.to_string()
+                                    }
+                                };
                                 let func_name = tc["function"]["name"].as_str().unwrap_or("").to_string();
                                 let func_args_str = tc["function"]["arguments"].as_str().unwrap_or("");
 

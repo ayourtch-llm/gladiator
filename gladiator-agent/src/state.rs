@@ -113,12 +113,17 @@ impl ConversationState {
 
     pub fn add_tool_calls(&mut self, tool_calls: Vec<serde_json::Value>) {
         let reasoning = self.drain_reasoning();
-        // Record the order of tool call IDs for reordering results later
+        // Record the order of tool call IDs for reordering results later.
+        // Synthesize ids for empty/missing ones so they don't collapse in the HashSet.
         self.tool_call_order.clear();
-        for tc in &tool_calls {
-            if let Some(id) = tc["id"].as_str() {
-                self.tool_call_order.push(id.to_string());
-            }
+        for (i, tc) in tool_calls.iter().enumerate() {
+            let id = tc["id"].as_str().unwrap_or("");
+            let id = if id.is_empty() {
+                format!("__idx_{}", i)
+            } else {
+                id.to_string()
+            };
+            self.tool_call_order.push(id);
         }
         let mut msg = serde_json::json!({
             "role": "assistant",
@@ -128,10 +133,8 @@ impl ConversationState {
             msg["reasoning"] = serde_json::Value::String(r);
         }
         self.messages.push(msg);
-        for tc in &tool_calls {
-            if let Some(id) = tc["id"].as_str() {
-                self.pending_tool_calls.insert(id.to_string());
-            }
+        for id in &self.tool_call_order {
+            self.pending_tool_calls.insert(id.clone());
         }
     }
 
