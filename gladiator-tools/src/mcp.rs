@@ -35,10 +35,29 @@ impl McpTool {
     }
 }
 
+fn normalize_schema(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Bool(true) => serde_json::json!({}),
+        serde_json::Value::Object(map) => {
+            let normalized: serde_json::Map<String, serde_json::Value> = map
+                .iter()
+                .map(|(k, v)| (k.clone(), normalize_schema(v)))
+                .collect();
+            serde_json::Value::Object(normalized)
+        }
+        serde_json::Value::Array(arr) => {
+            let normalized: Vec<serde_json::Value> =
+                arr.iter().map(normalize_schema).collect();
+            serde_json::Value::Array(normalized)
+        }
+        other => other.clone(),
+    }
+}
+
 fn tool_input_schema_to_json(
     schema: &Arc<serde_json::Map<String, serde_json::Value>>,
 ) -> serde_json::Value {
-    serde_json::Value::Object(schema.as_ref().clone())
+    normalize_schema(&serde_json::Value::Object(schema.as_ref().clone()))
 }
 
 #[async_trait::async_trait]

@@ -31,9 +31,10 @@ theme = "dark"
 
 [llm]
 model = "custom/glm-5.2"
+# model = "z/glm-5.2"
 base_url = "http://ts-agent-gateway:4000/v1"
 api_key = ""
-temperature = 0.7
+temperature = 0.2
 max_tokens = 65536
 request_timeout_secs = 120
 stream_timeout_secs = 300
@@ -43,7 +44,7 @@ retry_base_delay_ms = 500
 [agent]
 max_iterations = 50
 working_dir = "."
-system_message = "You are gladiator, an autonomous coding agent. You write code, run tests, and iterate until tests pass. Use the tools available to you to explore the codebase, make edits, run builds, and verify your work."
+system_message = "@misc/system.txt"
 
 [tools]
 bash = true
@@ -64,6 +65,11 @@ expose = ["plan_edits", "apply_edit_plan"]
 
 [mcp_servers.mcp-find-files]
 command = ["/Users/ayourtch/rust/mcp-find-files/target/release/mcp-find-files"]
+default = true
+expose = []
+
+[mcp_servers.rustmcp]
+command = ["/Users/ayourtch/rust/rust-mcp/target/release/rustmcp"]
 default = true
 expose = []
 
