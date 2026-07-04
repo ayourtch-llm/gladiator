@@ -318,9 +318,15 @@ impl App {
         if matches!(msg_type.as_str(), "LlmStream" | "LlmThinking") {
             let payload = msg.payload_str().unwrap_or_default();
             if !payload.is_empty() {
+                let is_thinking = msg_type == "LlmThinking";
+                let target_role = if is_thinking {
+                    crate::state::AppMessageRole::Thinking
+                } else {
+                    crate::state::AppMessageRole::Assistant
+                };
                 if self.chat.message_count() > 0 {
                     let last = self.chat.messages().last().unwrap();
-                    if last.role == crate::state::AppMessageRole::Assistant {
+                    if last.role == target_role {
                         // Insert newline on thinking→content or content→thinking transition
                         if let Some(ref prev) = self.last_stream_type {
                             if prev.as_str() != msg_type.as_str() {
@@ -332,7 +338,11 @@ impl App {
                         return;
                     }
                 }
-                self.chat.add_message(AppMessage::assistant(&payload));
+                if is_thinking {
+                    self.chat.add_message(AppMessage::thinking(&payload));
+                } else {
+                    self.chat.add_message(AppMessage::assistant(&payload));
+                }
                 self.last_stream_type = Some(msg_type);
             }
             return;
@@ -413,7 +423,7 @@ impl App {
                 if let Some(tool_calls) = msg.get("tool_calls").and_then(|t| t.as_array()) {
                     if let Some(r) = &reasoning {
                         if !r.is_empty() {
-                            self.chat.add_message(AppMessage::assistant(r.clone()));
+                            self.chat.add_message(AppMessage::thinking(r.clone()));
                         }
                     }
                     for tc in tool_calls {
@@ -440,10 +450,14 @@ impl App {
                     let full_content = if let Some(r) = reasoning {
                         if !r.is_empty() {
                             if content.is_empty() {
-                                r
-                            } else {
-                                format!("{}\n{}", r, content)
+                                self.chat.add_message(AppMessage::thinking(r));
+                                return;
                             }
+                            self.chat.add_message(AppMessage::thinking(r));
+                            if !content.is_empty() {
+                                self.chat.add_message(AppMessage::assistant(content));
+                            }
+                            return;
                         } else {
                             content
                         }

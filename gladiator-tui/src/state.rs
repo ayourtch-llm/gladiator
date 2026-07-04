@@ -2,6 +2,7 @@
 pub enum AppMessageRole {
     User,
     Assistant,
+    Thinking,
     Tool,
     Error,
     Info,
@@ -25,6 +26,13 @@ impl AppMessage {
     pub fn assistant(content: impl Into<String>) -> Self {
         Self {
             role: AppMessageRole::Assistant,
+            content: content.into(),
+        }
+    }
+
+    pub fn thinking(content: impl Into<String>) -> Self {
+        Self {
+            role: AppMessageRole::Thinking,
             content: content.into(),
         }
     }

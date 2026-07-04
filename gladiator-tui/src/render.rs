@@ -1,7 +1,7 @@
 use crate::state::{AppMessage, AppMessageRole, ChatState, InputState, ScrollState};
 use crate::theme::Theme;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
@@ -202,6 +202,7 @@ impl Renderer {
         let (prefix, prefix_color, text_color) = match msg.role {
             AppMessageRole::User => (">", self.theme.color_secondary(), self.theme.color_text()),
             AppMessageRole::Assistant => ("", self.theme.color_primary(), self.theme.color_text()),
+            AppMessageRole::Thinking => ("", self.theme.color_warning(), Color::Rgb(250, 220, 80)),
             AppMessageRole::Tool => ("[tool]", self.theme.color_info(), self.theme.color_info()),
             AppMessageRole::Error => ("[!]", self.theme.color_error(), self.theme.color_error()),
             AppMessageRole::Info => ("[i]", self.theme.color_info(), self.theme.color_text_muted()),
