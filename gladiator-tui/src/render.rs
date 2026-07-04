@@ -100,11 +100,11 @@ impl Renderer {
         let max_input_height = (area.height / 2).max(3);
         let input_height = input_height.min(max_input_height);
 
-        // Pending messages panel: each message is one line, +1 for border.
+        // Pending messages panel: 1 row per message + 1 for title + 1 for top border.
         let pending_height = if pending_messages.is_empty() {
             0
         } else {
-            (pending_messages.len() as u16 + 1).min((area.height / 4).max(3))
+            (pending_messages.len() as u16 + 2).min((area.height / 4).max(3))
         };
 
         let chunks = Layout::default()
@@ -164,8 +164,10 @@ impl Renderer {
         ]);
         lines.push(header);
 
+        // area.height includes 1 row consumed by top border + 1 row for the
+        // "pending messages" header. Remaining rows show actual messages.
         let available = area.height as usize;
-        let max_msgs = available.saturating_sub(1);
+        let max_msgs = available.saturating_sub(2); // -1 border, -1 title
         for msg in pending_messages.iter().take(max_msgs) {
             let mut spans: Vec<Span> = Vec::new();
             spans.push(Span::styled(
