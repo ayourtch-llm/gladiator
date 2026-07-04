@@ -43,7 +43,7 @@ max_retries = 3
 retry_base_delay_ms = 500
 
 [agent]
-max_iterations = 50
+max_iterations = 200
 working_dir = "."
 system_message = "@misc/system.txt"
 

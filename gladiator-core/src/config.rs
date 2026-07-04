@@ -317,7 +317,7 @@ impl Default for AgentConfig {
 }
 
 fn default_max_iterations() -> u32 {
-    50
+    200
 }
 fn default_system_message() -> String {
     "You are gladiator, an autonomous coding agent. You write code, run tests, and iterate until tests pass. Use the tools available to you to explore the codebase, make edits, run builds, and verify your work.".to_string()
