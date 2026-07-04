@@ -33,6 +33,7 @@ theme = "dark"
 model = "custom/glm-5.2"
 # model = "z/glm-5.2"
 base_url = "http://ts-agent-gateway:4000/v1"
+# base_url = "http://127.0.0.1:11434/v1"
 api_key = ""
 temperature = 0.2
 max_tokens = 65536
@@ -53,6 +54,10 @@ write = true
 edit = true
 glob = true
 grep = true
+
+[tools.sandbox]
+enabled = false
+network = false
 
 # MCP tool servers — external tool servers spawned as child processes.
 # Servers that duplicate built-in tools (read_file, write_file, edit_file, bash, glob, grep)
