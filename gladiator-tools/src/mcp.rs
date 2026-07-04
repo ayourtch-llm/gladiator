@@ -75,6 +75,7 @@ impl Tool for McpTool {
     }
 
     async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
+        eprintln!("[mcp-tool] executing {} with args: {:?}", self.tool_name, arguments);
         let peer = self.peer.lock().await;
         let args_map: serde_json::Map<String, serde_json::Value> = if let serde_json::Value::Object(m) = arguments {
             m.clone()
@@ -88,8 +89,15 @@ impl Tool for McpTool {
             task: None,
         };
 
-        match peer.call_tool(call_params).await {
-            Ok(result) => {
+        eprintln!("[mcp-tool] calling peer.call_tool with 10s timeout...");
+        eprintln!("[mcp-tool] peer info: {:?}", peer.peer_info());
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            peer.call_tool(call_params)
+        ).await;
+        eprintln!("[mcp-tool] call_tool result: {:?}", result.is_ok());
+        match result {
+            Ok(Ok(result)) => {
                 let content = result
                     .content
                     .iter()
@@ -107,7 +115,8 @@ impl Tool for McpTool {
                     Ok(content)
                 }
             }
-            Err(e) => Err(format!("MCP call failed: {}", e)),
+            Ok(Err(e)) => Err(format!("MCP call failed: {}", e)),
+            Err(_) => Err("MCP tool call timed out after 10 seconds".to_string()),
         }
     }
 }
@@ -234,7 +243,10 @@ impl McpServerRunner {
 
         // Keep the service loop alive in background
         let service_handle = tokio::spawn(async move {
-            let _ = running_service.waiting().await;
+            eprintln!("[mcp] waiting for service loop to complete...");
+            let result = running_service.waiting().await;
+            eprintln!("[mcp] service loop completed: {:?}", result.is_ok());
+            let _ = result;
         });
 
         Ok(McpServerHandle {

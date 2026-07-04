@@ -118,15 +118,19 @@ impl LlmActor {
         loop {
             match tokio::time::timeout(stream_timeout, stream.next()).await {
                 Ok(Some(Ok(chunk))) => {
+                    eprintln!("[llm] received chunk of {} bytes", chunk.len());
                     let payloads = crate::framing::decode_sse_chunk(&chunk);
                     for payload in payloads {
+                        eprintln!("[llm] SSE payload: {}", &payload[..payload.len().min(200)]);
                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&payload) {
                             let events = protocol.parse_event(&json, &mut state);
+                            eprintln!("[llm] parsed {} events", events.len());
 
                             for event in events {
                                 match event {
                                     LlmEvent::TextDelta { text, .. } => {
                                         if !text.is_empty() {
+                                            eprintln!("[llm] text delta: {}", &text[..text.len().min(100)]);
                                             rx_chars += text.chars().count();
                                             let chunk_msg = gladiator_core::Message::new(
                                                 &self.stream_topic,
@@ -152,38 +156,43 @@ impl LlmActor {
                                             let _ = bus.publish(&self.id(), chunk_msg).await;
                                         }
                                     }
-                                    LlmEvent::ToolInputStart { id, name } => {
+                                    LlmEvent::ToolInputStart { name, .. } => {
+                                        // Publish tool call start to TUI for progress display
+                                        let tc_payload = serde_json::json!({
+                                            "function": {
+                                                "name": name,
+                                                "arguments": "",
+                                            }
+                                        });
                                         let tc_msg = gladiator_core::Message::new(
-                                            &self.tool_calls_topic,
+                                            &self.stream_topic,
                                             &self.id(),
-                                            serde_json::json!({
-                                                "id": id,
-                                                "function": {
-                                                    "name": name,
-                                                }
-                                            }),
+                                            tc_payload,
                                         )
                                         .with_type("LlmToolCall")
                                         .with_stream_id(stream_id.to_string());
                                         let _ = bus.publish(&self.id(), tc_msg).await;
                                     }
-                                    LlmEvent::ToolInputDelta { id, name, text } => {
+                                    LlmEvent::ToolInputDelta { name, text, .. } => {
+                                        // Publish incremental tool call progress to TUI
+                                        let tc_payload = serde_json::json!({
+                                            "function": {
+                                                "name": name,
+                                                "arguments": text,
+                                            }
+                                        });
                                         let tc_msg = gladiator_core::Message::new(
-                                            &self.tool_calls_topic,
+                                            &self.stream_topic,
                                             &self.id(),
-                                            serde_json::json!({
-                                                "id": id,
-                                                "function": {
-                                                    "name": name,
-                                                    "arguments": text,
-                                                }
-                                            }),
+                                            tc_payload,
                                         )
                                         .with_type("LlmToolCall")
                                         .with_stream_id(stream_id.to_string());
                                         let _ = bus.publish(&self.id(), tc_msg).await;
                                     }
-                                    LlmEvent::ToolInputEnd { .. } => {}
+                                    LlmEvent::ToolInputEnd { .. } => {
+                                        // Tool calls are published after stream ends
+                                    }
                                     LlmEvent::ToolCall { id, name, input } => {
                                         tool_calls.push(serde_json::json!({
                                             "id": id,
@@ -220,7 +229,7 @@ impl LlmActor {
 
         self.publish_stream_end_and_stats(bus, stream_id, rx_chars).await;
 
-        Ok((full_response, tool_calls))
+        Ok((full_response, state.tool_calls))
     }
 
     async fn send_request(
@@ -234,6 +243,10 @@ impl LlmActor {
     ) -> Result<(String, Vec<serde_json::Value>), Box<dyn std::error::Error + Send + Sync>> {
         if config.model.is_empty() {
             return Err("LLM model name is empty".into());
+        }
+        eprintln!("[llm] send_request: model={}, tools={:?}", config.model, tools.is_some());
+        if let Some(tools) = tools {
+            eprintln!("[llm] tools count: {}", tools.len());
         }
 
         let stream_id = uuid::Uuid::new_v4().to_string();
@@ -250,14 +263,22 @@ impl LlmActor {
 
         let provider = ProviderConfig::new("openai", &config.base_url, &config.api_key);
         let route = provider.openai_chat_route();
-        let response = route.send(&canonical, config).await?;
-
-        self.stream_response(response, config, bus, &stream_id, &*route.protocol, &tool_runtime)
-            .await
-            .map_err(|e| {
-                tracing::error!("[llm{}] Stream failed: {}", self.index, e);
-                Box::new(e) as Box<dyn std::error::Error + Send + Sync>
-            })
+        eprintln!("[llm] sending request to {} via {}", config.base_url, route.id);
+        match route.send(&canonical, config).await {
+            Ok(response) => {
+                eprintln!("[llm] request succeeded, streaming response");
+                self.stream_response(response, config, bus, &stream_id, &*route.protocol, &tool_runtime)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("[llm{}] Stream failed: {}", self.index, e);
+                        Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+                    })
+            }
+            Err(e) => {
+                eprintln!("[llm] request failed: {}", e);
+                Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+            }
+        }
     }
 
     pub async fn generate_object(

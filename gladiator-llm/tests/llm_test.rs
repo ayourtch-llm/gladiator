@@ -271,6 +271,55 @@ fn openai_chat_parse_event_tool_call() {
     let events = protocol.parse_event(&raw, &mut state);
     assert!(!events.is_empty());
     assert!(events.iter().any(|e| matches!(e, LlmEvent::ToolInputStart { id, name, .. } if id == "call-1" && name == "bash")));
+    assert_eq!(state.tool_calls.len(), 1);
+    assert_eq!(state.tool_calls[0]["id"], "call-1");
+    assert_eq!(state.tool_calls[0]["function"]["name"], "bash");
+    assert_eq!(state.tool_calls[0]["function"]["arguments"], "{\"cmd\": \"ls\"}");
+}
+
+#[test]
+fn openai_chat_parse_event_tool_call_streaming() {
+    let protocol = OpenAIChatProtocol;
+    let mut state = StreamState::default();
+
+    // First chunk: has id, name, and partial arguments
+    let chunk1 = serde_json::json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call-1",
+                    "function": {
+                        "name": "random_integer",
+                        "arguments": "{\"min"
+                    }
+                }]
+            }
+        }]
+    });
+    let _events1 = protocol.parse_event(&chunk1, &mut state);
+
+    // Second chunk: same index, no id, no name, continuation of arguments
+    let chunk2 = serde_json::json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "function": {
+                        "arguments": "\": 1, \"max\": 10}"
+                    }
+                }]
+            }
+        }]
+    });
+    let _events2 = protocol.parse_event(&chunk2, &mut state);
+
+    // state.tool_calls should have a single entry with accumulated arguments
+    assert_eq!(state.tool_calls.len(), 1);
+    assert_eq!(state.tool_calls[0]["id"], "call-1");
+    assert_eq!(state.tool_calls[0]["function"]["name"], "random_integer");
+    let args = state.tool_calls[0]["function"]["arguments"].as_str().unwrap();
+    assert_eq!(args, "{\"min\": 1, \"max\": 10}");
 }
 
 #[test]

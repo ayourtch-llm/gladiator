@@ -317,6 +317,7 @@ impl Actor for AgentActor {
                             }
 
                             for (i, tc) in tool_calls.iter().enumerate() {
+                                eprintln!("[agent] tool_call[{}]: {:?}", i, tc);
                                 let tool_call_id = {
                                     let raw = tc["id"].as_str().unwrap_or("");
                                     if raw.is_empty() {
@@ -326,9 +327,13 @@ impl Actor for AgentActor {
                                     }
                                 };
                                 let func_name = tc["function"]["name"].as_str().unwrap_or("").to_string();
-                                let func_args_str = tc["function"]["arguments"].as_str().unwrap_or("");
+                                let func_args_str = match tc["function"]["arguments"].as_str() {
+                                    Some(s) => s.to_string(),
+                                    None => tc["function"]["arguments"].to_string(),
+                                };
+                                eprintln!("[agent] func_name={}, func_args_str={}", func_name, func_args_str);
 
-                                let args: serde_json::Value = match serde_json::from_str(func_args_str) {
+                                let args: serde_json::Value = match serde_json::from_str(&func_args_str) {
                                     Ok(a) => a,
                                     Err(e) => {
                                         error!("Failed to parse tool args for {}: {}", func_name, e);

@@ -45,11 +45,13 @@ impl ToolRegistry {
         self.tools
             .iter()
             .map(|t| {
-                ToolSyntax::new(
+                let syntax = ToolSyntax::new(
                     t.name().to_string(),
                     t.description().to_string(),
                     t.parameters(),
-                )
+                );
+                eprintln!("[registry] tool: {} params: {}", syntax.name, serde_json::to_string(&syntax.parameters).unwrap_or_default());
+                syntax
             })
             .collect()
     }

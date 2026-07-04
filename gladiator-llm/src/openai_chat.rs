@@ -67,23 +67,52 @@ impl Protocol for OpenAIChatProtocol {
                         lifecycle.reasoning_end(&mut events);
                         for tool_call in tool_calls {
                             if let Some(index) = tool_call["index"].as_u64() {
-                                let _idx = index as usize;
+                                let idx = index as usize;
                                 let name = tool_call["function"]["name"].as_str().unwrap_or("");
-                                let args = tool_call["function"]["arguments"].as_str().unwrap_or("");
+                                let args_delta = tool_call["function"]["arguments"].as_str().unwrap_or("");
                                 let call_id = tool_call["id"].as_str().unwrap_or("");
 
-                                events.push(LlmEvent::ToolInputStart {
-                                    id: call_id.to_string(),
-                                    name: name.to_string(),
-                                });
+                                // Grow state.tool_calls to fit this index
+                                while state.tool_calls.len() <= idx {
+                                    state.tool_calls.push(serde_json::json!({
+                                        "id": "",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "",
+                                            "arguments": "",
+                                        }
+                                    }));
+                                }
+
+                                let tc = &mut state.tool_calls[idx];
+
+                                // Set id and name only when present (first chunk for this index)
+                                if !call_id.is_empty() {
+                                    tc["id"] = serde_json::json!(call_id);
+                                }
+                                if !name.is_empty() {
+                                    tc["function"]["name"] = serde_json::json!(name);
+                                }
+
+                                // Append arguments delta
+                                let current_args = tc["function"]["arguments"].as_str().unwrap_or("");
+                                let combined = format!("{}{}", current_args, args_delta);
+                                tc["function"]["arguments"] = serde_json::json!(combined);
+
+                                // Emit events for TUI progress
+                                let tc_id = tc["id"].as_str().unwrap_or("").to_string();
+                                let tc_name = tc["function"]["name"].as_str().unwrap_or("").to_string();
+
+                                if !call_id.is_empty() || !name.is_empty() {
+                                    events.push(LlmEvent::ToolInputStart {
+                                        id: tc_id.clone(),
+                                        name: tc_name.clone(),
+                                    });
+                                }
                                 events.push(LlmEvent::ToolInputDelta {
-                                    id: call_id.to_string(),
-                                    name: name.to_string(),
-                                    text: args.to_string(),
-                                });
-                                events.push(LlmEvent::ToolInputEnd {
-                                    id: call_id.to_string(),
-                                    name: name.to_string(),
+                                    id: tc_id,
+                                    name: tc_name,
+                                    text: combined,
                                 });
                             }
                         }

@@ -35,6 +35,7 @@ pub enum LlmEvent {
     ToolInputEnd {
         id: String,
         name: String,
+        input: String,
     },
     ToolCall {
         id: String,
