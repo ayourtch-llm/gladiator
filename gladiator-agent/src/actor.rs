@@ -231,6 +231,10 @@ impl Actor for AgentActor {
                                 let mut s = state.lock().await;
                                 s.was_interrupted = true;
                                 s.clear_reasoning();
+                                // Preserve partial assistant text that was streamed before the interrupt
+                                if let Some(partial) = s.drain_partial_response() {
+                                    s.add_assistant_message(partial);
+                                }
                                 drop(s);
                                 // Forward to TUI as a warning so the user sees the interrupt
                                 let warn_msg = Message::new(
@@ -261,6 +265,12 @@ impl Actor for AgentActor {
                                 if !chunk.is_empty() {
                                     let mut s = state.lock().await;
                                     s.append_reasoning(&chunk);
+                                }
+                            } else if msg_type == "LlmStream" {
+                                let chunk = msg.payload_str().unwrap_or_default();
+                                if !chunk.is_empty() {
+                                    let mut s = state.lock().await;
+                                    s.append_partial_response(&chunk);
                                 }
                             }
                             let preview = msg.payload_str().unwrap_or_default();

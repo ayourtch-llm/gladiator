@@ -13,6 +13,11 @@ pub struct ConversationState {
     /// next assistant/tool_calls message via "reasoning" field.
     #[serde(skip)]
     pub current_reasoning: String,
+    /// Accumulated partial content from LlmStream chunks.
+    /// Transient: not serialized. Used to preserve partial assistant
+    /// text when the LLM is interrupted mid-response.
+    #[serde(skip)]
+    pub current_partial_response: String,
     /// Ordered list of tool_call IDs in the current batch. Used to
     /// reorder tool results to match the LLM's tool_calls array.
     /// Transient: not serialized.
@@ -61,6 +66,20 @@ impl ConversationState {
         self.current_reasoning.push_str(chunk);
     }
 
+    /// Append a chunk of partial response content accumulated during streaming.
+    pub fn append_partial_response(&mut self, chunk: &str) {
+        self.current_partial_response.push_str(chunk);
+    }
+
+    /// Drain accumulated partial response, returning it if non-empty.
+    pub fn drain_partial_response(&mut self) -> Option<String> {
+        if self.current_partial_response.is_empty() {
+            None
+        } else {
+            Some(std::mem::take(&mut self.current_partial_response))
+        }
+    }
+
     /// Drain accumulated reasoning, returning it if non-empty.
     fn drain_reasoning(&mut self) -> Option<String> {
         if self.current_reasoning.is_empty() {
@@ -73,6 +92,11 @@ impl ConversationState {
     /// Clear any accumulated reasoning (e.g. after an interrupt).
     pub fn clear_reasoning(&mut self) {
         self.current_reasoning.clear();
+    }
+
+    /// Clear accumulated partial response (e.g. after an interrupt).
+    pub fn clear_partial_response(&mut self) {
+        self.current_partial_response.clear();
     }
 
     pub fn add_assistant_message(&mut self, content: impl Into<String>) {
