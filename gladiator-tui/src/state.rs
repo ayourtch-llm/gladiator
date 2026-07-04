@@ -322,7 +322,7 @@ impl InputState {
         let target_info = &layout.visual_lines[target_visual];
         let target_logical = target_info.logical_line;
 
-        // Compute the byte offset of the target visual line's start within the buffer
+        // Compute the byte offset of the target logical line's start within the buffer
         let logical_lines: Vec<&str> = self.buffer.split('\n').collect();
         let mut byte_offset_to_logical = 0usize;
         for (i, line) in logical_lines.iter().enumerate() {
@@ -334,16 +334,12 @@ impl InputState {
 
         let logical_str = logical_lines[target_logical];
 
-        // Target column: keep the visual column if it fits, otherwise clamp to end of target line
+        // Target char position within the logical line: visual line start + column
         let target_col = layout.cursor_visual_col.min(target_info.char_count);
+        let target_char_pos = target_info.char_start + target_col;
         let mut byte_in_line = 0usize;
-        let mut col = 0usize;
-        for ch in logical_str.chars() {
-            if col >= target_col {
-                break;
-            }
+        for ch in logical_str.chars().take(target_char_pos) {
             byte_in_line += ch.len_utf8();
-            col += 1;
         }
 
         self.cursor = byte_offset_to_logical + byte_in_line;
@@ -361,7 +357,7 @@ impl InputState {
         let target_info = &layout.visual_lines[target_visual];
         let target_logical = target_info.logical_line;
 
-        // Compute the byte offset of the target visual line's start within the buffer
+        // Compute the byte offset of the target logical line's start within the buffer
         let logical_lines: Vec<&str> = self.buffer.split('\n').collect();
         let mut byte_offset_to_logical = 0usize;
         for (i, line) in logical_lines.iter().enumerate() {
@@ -373,16 +369,12 @@ impl InputState {
 
         let logical_str = logical_lines[target_logical];
 
-        // Target column: keep the visual column if it fits, otherwise clamp to end of target line
+        // Target char position within the logical line: visual line start + column
         let target_col = layout.cursor_visual_col.min(target_info.char_count);
+        let target_char_pos = target_info.char_start + target_col;
         let mut byte_in_line = 0usize;
-        let mut col = 0usize;
-        for ch in logical_str.chars() {
-            if col >= target_col {
-                break;
-            }
+        for ch in logical_str.chars().take(target_char_pos) {
             byte_in_line += ch.len_utf8();
-            col += 1;
         }
 
         self.cursor = byte_offset_to_logical + byte_in_line;
