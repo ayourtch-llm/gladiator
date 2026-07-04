@@ -78,13 +78,26 @@ async fn spawn_mcp_servers(
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cli = Cli::parse();
 
-    let config = if let Some(path) = &cli.config {
+    let mut config = if let Some(path) = &cli.config {
         Config::from_file(path)?
     } else if std::path::Path::new("gladiator.toml").exists() {
         Config::from_file(std::path::Path::new("gladiator.toml"))?
     } else {
         Config::default()
     };
+
+    // If system_message starts with "@", read the real system message from that file.
+    if config.agent.system_message.starts_with('@') {
+        let filename = config.agent.system_message[1..].trim().to_string();
+        match std::fs::read_to_string(&filename) {
+            Ok(content) => {
+                config.agent.system_message = content;
+            }
+            Err(e) => {
+                tracing::warn!("Failed to read system message file '{}': {}", filename, e);
+            }
+        }
+    }
 
     let host = cli.host.clone();
     let port = cli.port;
