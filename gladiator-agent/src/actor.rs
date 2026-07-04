@@ -230,6 +230,7 @@ impl Actor for AgentActor {
                             if output.starts_with("Interrupted:") {
                                 let mut s = state.lock().await;
                                 s.was_interrupted = true;
+                                s.clear_reasoning();
                                 drop(s);
                                 // Forward to TUI as a warning so the user sees the interrupt
                                 let warn_msg = Message::new(
@@ -254,6 +255,14 @@ impl Actor for AgentActor {
                     match result {
                         Ok(msg) => {
                             let msg_type = msg.meta_type().unwrap_or_default().to_string();
+                            // Accumulate reasoning chunks for save/load
+                            if msg_type == "LlmThinking" {
+                                let chunk = msg.payload_str().unwrap_or_default();
+                                if !chunk.is_empty() {
+                                    let mut s = state.lock().await;
+                                    s.append_reasoning(&chunk);
+                                }
+                            }
                             let preview = msg.payload_str().unwrap_or_default();
                             let preview = if preview.len() > 60 { format!("{}...", &preview[..60]) } else { preview };
                             debug!("Agent {} forwarding stream ({}) to {}: {}", self.index, msg_type, self.stream_output_topic, preview);
@@ -426,10 +435,18 @@ impl Actor for AgentActor {
                                     let state_json = msg.payload.get("state").cloned().unwrap_or(serde_json::Value::Null);
                                     match serde_json::from_value::<ConversationState>(state_json) {
                                         Ok(new_state) => {
-                                            {
+                                            let messages = {
                                                 let mut s = state.lock().await;
                                                 *s = new_state;
-                                            }
+                                                s.messages.clone()
+                                            };
+                                            // Publish replay so TUI can reconstruct display
+                                            let replay_msg = Message::new(
+                                                &self.stream_output_topic,
+                                                &self.id(),
+                                                serde_json::json!({"messages": messages}),
+                                            ).with_type("StateReplay");
+                                            let _ = bus.publish(&self.id(), replay_msg).await;
                                             let info_msg = Message::new(
                                                 &self.stream_output_topic,
                                                 &self.id(),

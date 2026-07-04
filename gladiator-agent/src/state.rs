@@ -8,6 +8,16 @@ pub struct ConversationState {
     pub pending_tool_calls: HashSet<String>,
     pub pending_messages: Vec<String>,
     pub was_interrupted: bool,
+    /// Accumulated reasoning from LlmThinking stream chunks.
+    /// Transient: not serialized (see #[serde(skip)]). Attached to the
+    /// next assistant/tool_calls message via "reasoning" field.
+    #[serde(skip)]
+    pub current_reasoning: String,
+    /// Ordered list of tool_call IDs in the current batch. Used to
+    /// reorder tool results to match the LLM's tool_calls array.
+    /// Transient: not serialized.
+    #[serde(skip)]
+    pub tool_call_order: Vec<String>,
 }
 
 impl ConversationState {
@@ -16,6 +26,7 @@ impl ConversationState {
     }
 
     pub fn add_user_message(&mut self, content: impl Into<String>) {
+        self.current_reasoning.clear();
         let content_str = content.into();
         self.messages.push(serde_json::json!({
             "role": "user",
@@ -29,6 +40,7 @@ impl ConversationState {
     /// This is used after an interrupt to avoid sending two user messages
     /// in a row to the LLM.
     pub fn merge_user_message(&mut self, content: impl Into<String>) {
+        self.current_reasoning.clear();
         let content_str = content.into();
         if let Some(last) = self.messages.last_mut() {
             if last.get("role").and_then(|r| r.as_str()) == Some("user") {
@@ -43,18 +55,55 @@ impl ConversationState {
         self.add_user_message(content_str);
     }
 
+    /// Append a chunk of reasoning content accumulated during streaming.
+    /// Chunks are concatenated directly (matching TUI streaming behavior).
+    pub fn append_reasoning(&mut self, chunk: &str) {
+        self.current_reasoning.push_str(chunk);
+    }
+
+    /// Drain accumulated reasoning, returning it if non-empty.
+    fn drain_reasoning(&mut self) -> Option<String> {
+        if self.current_reasoning.is_empty() {
+            None
+        } else {
+            Some(std::mem::take(&mut self.current_reasoning))
+        }
+    }
+
+    /// Clear any accumulated reasoning (e.g. after an interrupt).
+    pub fn clear_reasoning(&mut self) {
+        self.current_reasoning.clear();
+    }
+
     pub fn add_assistant_message(&mut self, content: impl Into<String>) {
-        self.messages.push(serde_json::json!({
+        let reasoning = self.drain_reasoning();
+        let mut msg = serde_json::json!({
             "role": "assistant",
             "content": content.into()
-        }));
+        });
+        if let Some(r) = reasoning {
+            msg["reasoning"] = serde_json::Value::String(r);
+        }
+        self.messages.push(msg);
     }
 
     pub fn add_tool_calls(&mut self, tool_calls: Vec<serde_json::Value>) {
-        self.messages.push(serde_json::json!({
+        let reasoning = self.drain_reasoning();
+        // Record the order of tool call IDs for reordering results later
+        self.tool_call_order.clear();
+        for tc in &tool_calls {
+            if let Some(id) = tc["id"].as_str() {
+                self.tool_call_order.push(id.to_string());
+            }
+        }
+        let mut msg = serde_json::json!({
             "role": "assistant",
             "tool_calls": tool_calls
-        }));
+        });
+        if let Some(r) = reasoning {
+            msg["reasoning"] = serde_json::Value::String(r);
+        }
+        self.messages.push(msg);
         for tc in &tool_calls {
             if let Some(id) = tc["id"].as_str() {
                 self.pending_tool_calls.insert(id.to_string());
@@ -84,10 +133,47 @@ impl ConversationState {
 
     pub fn resolve_tool_call(&mut self, tool_call_id: &str) {
         self.pending_tool_calls.remove(tool_call_id);
+        // When all tool calls in the current batch are resolved, reorder
+        // the tool result messages to match the original tool_calls array
+        // order from the LLM.
+        if self.pending_tool_calls.is_empty() && !self.tool_call_order.is_empty() {
+            self.reorder_tool_results();
+        }
     }
 
     pub fn all_tool_calls_resolved(&self) -> bool {
         self.pending_tool_calls.is_empty()
+    }
+
+    /// Reorder the last N tool result messages to match the original
+    /// tool_calls array order. Called when all tool calls in a batch
+    /// are resolved. N is determined by `tool_call_order.len()`.
+    fn reorder_tool_results(&mut self) {
+        let n = self.tool_call_order.len();
+        if n == 0 || self.messages.len() < n {
+            self.tool_call_order.clear();
+            return;
+        }
+
+        // The last n messages should be the tool results from this batch
+        let start = self.messages.len() - n;
+        let mut tool_results: Vec<serde_json::Value> = self.messages.drain(start..).collect();
+
+        // Sort tool results to match the original tool_call_order
+        let order = self.tool_call_order.clone();
+        tool_results.sort_by_key(|result| {
+            let tc_id = result
+                .get("tool_call_id")
+                .and_then(|t| t.as_str())
+                .unwrap_or("");
+            order.iter().position(|id| id == tc_id).unwrap_or(usize::MAX)
+        });
+
+        for result in tool_results {
+            self.messages.push(result);
+        }
+
+        self.tool_call_order.clear();
     }
 
     pub fn increment_iteration(&mut self) {
@@ -111,7 +197,13 @@ impl ConversationState {
         if !system_message.is_empty() {
             result.push(serde_json::json!({"role": "system", "content": system_message}));
         }
-        result.extend(self.messages.iter().cloned());
+        for msg in &self.messages {
+            let mut m = msg.clone();
+            if let serde_json::Value::Object(ref mut obj) = m {
+                obj.remove("reasoning");
+            }
+            result.push(m);
+        }
         result
     }
 }

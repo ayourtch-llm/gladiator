@@ -278,6 +278,20 @@ impl App {
             return;
         }
 
+        // Handle state replay (from /load): rebuild chat from saved conversation
+        if msg_type == "StateReplay" {
+            self.chat.clear();
+            self.last_stream_type = None;
+            self.last_tool_call_index = None;
+            if let Some(messages) = msg.payload.get("messages").and_then(|m| m.as_array()) {
+                for replay_msg in messages {
+                    self.replay_message_to_app(replay_msg);
+                }
+            }
+            self.scroll.scroll_to_bottom();
+            return;
+        }
+
         // Handle streaming tokens (append to last assistant message)
         if matches!(msg_type.as_str(), "LlmStream" | "LlmThinking") {
             let payload = msg.payload_str().unwrap_or_default();
@@ -352,6 +366,104 @@ impl App {
             self.chat.add_message(app_msg);
             self.last_stream_type = None;
             self.last_tool_call_index = None;
+        }
+    }
+
+    /// Convert a saved conversation message (LLM API format) to AppMessage(s)
+    /// and add them to the chat. Used during StateReplay to reconstruct the
+    /// display from the loaded ConversationState.
+    fn replay_message_to_app(&mut self, msg: &serde_json::Value) {
+        let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
+        match role {
+            "user" => {
+                let content = msg
+                    .get("content")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                self.chat.add_message(AppMessage::user(content));
+            }
+            "assistant" => {
+                let reasoning = msg
+                    .get("reasoning")
+                    .and_then(|r| r.as_str())
+                    .map(|s| s.to_string());
+                if let Some(tool_calls) = msg.get("tool_calls").and_then(|t| t.as_array()) {
+                    if let Some(r) = &reasoning {
+                        if !r.is_empty() {
+                            self.chat.add_message(AppMessage::assistant(r.clone()));
+                        }
+                    }
+                    for tc in tool_calls {
+                        let name = tc["function"]["name"].as_str().unwrap_or("");
+                        let args = tc["function"]["arguments"].as_str().unwrap_or("");
+                        let content = if !name.is_empty() && !args.is_empty() {
+                            format!("{}({})", name, args)
+                        } else if !name.is_empty() {
+                            format!("{}(building...)", name)
+                        } else {
+                            "building...".to_string()
+                        };
+                        self.chat.add_message(AppMessage {
+                            role: crate::state::AppMessageRole::Tool,
+                            content,
+                        });
+                    }
+                } else {
+                    let content = msg
+                        .get("content")
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let full_content = if let Some(r) = reasoning {
+                        if !r.is_empty() {
+                            if content.is_empty() {
+                                r
+                            } else {
+                                format!("{}\n{}", r, content)
+                            }
+                        } else {
+                            content
+                        }
+                    } else {
+                        content
+                    };
+                    if !full_content.is_empty() {
+                        self.chat.add_message(AppMessage::assistant(full_content));
+                    }
+                }
+            }
+            "tool" => {
+                let name = msg
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let content = msg
+                    .get("content")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let tool_call_id = msg
+                    .get("tool_call_id")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let display = format!("[tool_result] {}({}) => {}", name, tool_call_id, content);
+                self.chat.add_message(AppMessage {
+                    role: crate::state::AppMessageRole::Tool,
+                    content: display,
+                });
+            }
+            "system" => {
+                let content = msg
+                    .get("content")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                self.chat.add_message(AppMessage::system(content));
+            }
+            _ => {}
         }
     }
 
