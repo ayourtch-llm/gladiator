@@ -10,7 +10,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// A single MCP tool wrapped as a gladiator Tool.
 pub struct McpTool {
@@ -75,7 +75,7 @@ impl Tool for McpTool {
     }
 
     async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
-        eprintln!("[mcp-tool] executing {} with args: {:?}", self.tool_name, arguments);
+        debug!("[mcp-tool] executing {} with args: {:?}", self.tool_name, arguments);
         let peer = self.peer.lock().await;
         let args_map: serde_json::Map<String, serde_json::Value> = if let serde_json::Value::Object(m) = arguments {
             m.clone()
@@ -89,13 +89,13 @@ impl Tool for McpTool {
             task: None,
         };
 
-        eprintln!("[mcp-tool] calling peer.call_tool with 10s timeout...");
-        eprintln!("[mcp-tool] peer info: {:?}", peer.peer_info());
+        debug!("[mcp-tool] calling peer.call_tool with 10s timeout...");
+        debug!("[mcp-tool] peer info: {:?}", peer.peer_info());
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(10),
             peer.call_tool(call_params)
         ).await;
-        eprintln!("[mcp-tool] call_tool result: {:?}", result.is_ok());
+        debug!("[mcp-tool] call_tool result: {:?}", result.is_ok());
         match result {
             Ok(Ok(result)) => {
                 let content = result
@@ -243,9 +243,9 @@ impl McpServerRunner {
 
         // Keep the service loop alive in background
         let service_handle = tokio::spawn(async move {
-            eprintln!("[mcp] waiting for service loop to complete...");
+            debug!("[mcp] waiting for service loop to complete...");
             let result = running_service.waiting().await;
-            eprintln!("[mcp] service loop completed: {:?}", result.is_ok());
+            debug!("[mcp] service loop completed: {:?}", result.is_ok());
             let _ = result;
         });
 

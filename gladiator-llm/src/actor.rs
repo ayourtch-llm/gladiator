@@ -9,6 +9,7 @@ use gladiator_core::Actor;
 use futures::StreamExt;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tracing::{debug, error, info};
 
 #[derive(Debug, Default)]
 pub struct LlmActor {
@@ -118,19 +119,19 @@ impl LlmActor {
         loop {
             match tokio::time::timeout(stream_timeout, stream.next()).await {
                 Ok(Some(Ok(chunk))) => {
-                    eprintln!("[llm] received chunk of {} bytes", chunk.len());
+                    debug!("[llm] received chunk of {} bytes", chunk.len());
                     let payloads = crate::framing::decode_sse_chunk(&chunk);
                     for payload in payloads {
-                        eprintln!("[llm] SSE payload: {}", &payload[..payload.len().min(200)]);
+                        debug!("[llm] SSE payload: {}", &payload[..payload.len().min(200)]);
                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&payload) {
                             let events = protocol.parse_event(&json, &mut state);
-                            eprintln!("[llm] parsed {} events", events.len());
+                            debug!("[llm] parsed {} events", events.len());
 
                             for event in events {
                                 match event {
                                     LlmEvent::TextDelta { text, .. } => {
                                         if !text.is_empty() {
-                                            eprintln!("[llm] text delta: {}", &text[..text.len().min(100)]);
+                                            debug!("[llm] text delta: {}", &text[..text.len().min(100)]);
                                             rx_chars += text.chars().count();
                                             let chunk_msg = gladiator_core::Message::new(
                                                 &self.stream_topic,
@@ -244,9 +245,9 @@ impl LlmActor {
         if config.model.is_empty() {
             return Err("LLM model name is empty".into());
         }
-        eprintln!("[llm] send_request: model={}, tools={:?}", config.model, tools.is_some());
+        info!("[llm] send_request: model={}, tools={}", config.model, tools.is_some());
         if let Some(tools) = tools {
-            eprintln!("[llm] tools count: {}", tools.len());
+            info!("[llm] tools count: {}", tools.len());
         }
 
         let stream_id = uuid::Uuid::new_v4().to_string();
@@ -263,10 +264,10 @@ impl LlmActor {
 
         let provider = ProviderConfig::new("openai", &config.base_url, &config.api_key);
         let route = provider.openai_chat_route();
-        eprintln!("[llm] sending request to {} via {}", config.base_url, route.id);
+        info!("[llm] sending request to {} via {}", config.base_url, route.id);
         match route.send(&canonical, config).await {
             Ok(response) => {
-                eprintln!("[llm] request succeeded, streaming response");
+            info!("[llm] request succeeded, streaming response");
                 self.stream_response(response, config, bus, &stream_id, &*route.protocol, &tool_runtime)
                     .await
                     .map_err(|e| {
@@ -275,7 +276,7 @@ impl LlmActor {
                     })
             }
             Err(e) => {
-                eprintln!("[llm] request failed: {}", e);
+            error!("[llm] request failed: {}", e);
                 Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
             }
         }

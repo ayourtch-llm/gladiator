@@ -317,7 +317,7 @@ impl Actor for AgentActor {
                             }
 
                             for (i, tc) in tool_calls.iter().enumerate() {
-                                eprintln!("[agent] tool_call[{}]: {:?}", i, tc);
+                                debug!("[agent] tool_call[{}]: {:?}", i, tc);
                                 let tool_call_id = {
                                     let raw = tc["id"].as_str().unwrap_or("");
                                     if raw.is_empty() {
@@ -331,7 +331,7 @@ impl Actor for AgentActor {
                                     Some(s) => s.to_string(),
                                     None => tc["function"]["arguments"].to_string(),
                                 };
-                                eprintln!("[agent] func_name={}, func_args_str={}", func_name, func_args_str);
+                                debug!("[agent] func_name={}, func_args_str={}", func_name, func_args_str);
 
                                 let args: serde_json::Value = match serde_json::from_str(&func_args_str) {
                                     Ok(a) => a,

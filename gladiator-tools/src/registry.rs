@@ -1,6 +1,6 @@
 use crate::tool::{Tool, ToolSyntax};
 use std::sync::Arc;
-use tracing::warn;
+use tracing::{debug, warn};
 
 /// Registry that holds all available tools and provides OpenAI-compatible
 /// tool definitions for the LLM.
@@ -50,7 +50,7 @@ impl ToolRegistry {
                     t.description().to_string(),
                     t.parameters(),
                 );
-                eprintln!("[registry] tool: {} params: {}", syntax.name, serde_json::to_string(&syntax.parameters).unwrap_or_default());
+                debug!("[registry] tool: {} params: {}", syntax.name, serde_json::to_string(&syntax.parameters).unwrap_or_default());
                 syntax
             })
             .collect()
