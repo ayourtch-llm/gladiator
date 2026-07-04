@@ -220,7 +220,7 @@ impl McpServerRunner {
                     if text.contains("ERROR") || text.contains("error") {
                         warn!("[mcp:{}:stderr] {}", prefix, text);
                     } else {
-                        info!("[mcp:{}:stderr] {}", prefix, text);
+                        debug!("[mcp:{}:stderr] {}", prefix, text);
                     }
                 }
             });
