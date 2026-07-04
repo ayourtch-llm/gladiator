@@ -12,6 +12,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use clap::Parser;
 use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::Layer;
 
 mod debug_layer;
 use debug_layer::ChatMakeWriter;
@@ -117,9 +118,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // In TUI mode, redirect tracing to a file so it doesn't corrupt the terminal.
     // In headless mode, use stderr as normal.
     // In both modes, add a chat layer that routes events to the bus when debug is on.
+    //
+    // The file/stderr layer uses EnvFilter (default: info) to limit log file verbosity.
+    // The chat layer uses LevelFilter::TRACE so ALL events reach the ChatMakeWriter,
+    // which gates output via the debug_flag. This way /debug can surface debug-level
+    // events that the EnvFilter would otherwise filter out.
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "info".into());
     let chat_make_writer = ChatMakeWriter::new(debug_flag.clone(), log_tx);
+    use tracing_subscriber::filter::LevelFilter;
+    use tracing_subscriber::layer::SubscriberExt;
     if !no_tui {
         match std::fs::OpenOptions::new()
             .create(true)
@@ -129,34 +137,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         {
             Ok(log_file) => {
                 let log_writer = std::sync::Arc::new(log_file);
-                use tracing_subscriber::layer::SubscriberExt;
                 let fmt_layer = tracing_subscriber::fmt::layer()
-                    .with_writer(log_writer);
+                    .with_writer(log_writer)
+                    .with_filter(env_filter);
                 let chat_layer = tracing_subscriber::fmt::layer()
-                    .with_writer(chat_make_writer);
+                    .with_writer(chat_make_writer)
+                    .with_filter(LevelFilter::TRACE);
                 tracing_subscriber::registry()
-                    .with(env_filter)
                     .with(fmt_layer)
                     .with(chat_layer)
                     .init();
             }
             Err(_) => {
-                use tracing_subscriber::layer::SubscriberExt;
                 let chat_layer = tracing_subscriber::fmt::layer()
-                    .with_writer(chat_make_writer);
+                    .with_writer(chat_make_writer)
+                    .with_filter(LevelFilter::TRACE);
                 tracing_subscriber::registry()
-                    .with(env_filter)
                     .with(chat_layer)
                     .init();
             }
         }
     } else {
-        use tracing_subscriber::layer::SubscriberExt;
-        let stderr_layer = tracing_subscriber::fmt::layer();
+        let stderr_layer = tracing_subscriber::fmt::layer()
+            .with_filter(env_filter);
         let chat_layer = tracing_subscriber::fmt::layer()
-            .with_writer(chat_make_writer);
+            .with_writer(chat_make_writer)
+            .with_filter(LevelFilter::TRACE);
         tracing_subscriber::registry()
-            .with(env_filter)
             .with(stderr_layer)
             .with(chat_layer)
             .init();

@@ -54,6 +54,12 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for ChatMakeWriter {
     }
 }
 
+impl Drop for ChatWriter {
+    fn drop(&mut self) {
+        let _ = std::io::Write::flush(self);
+    }
+}
+
 impl ChatMakeWriter {
     pub fn new(enabled: Arc<AtomicBool>, sender: mpsc::UnboundedSender<String>) -> Self {
         Self { enabled, sender }
