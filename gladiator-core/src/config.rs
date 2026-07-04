@@ -334,6 +334,8 @@ pub struct ToolsConfig {
     pub grep: bool,
     #[serde(default = "default_tool_on")]
     pub fixme: bool,
+    #[serde(default = "default_tool_on")]
+    pub conclusions: bool,
     #[serde(default)]
     pub sandbox: SandboxConfig,
 }
@@ -348,6 +350,7 @@ impl Default for ToolsConfig {
             glob: true,
             grep: true,
             fixme: true,
+            conclusions: true,
             sandbox: SandboxConfig::default(),
         }
     }

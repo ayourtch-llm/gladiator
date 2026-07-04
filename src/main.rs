@@ -4,6 +4,7 @@ use gladiator_core::{Bus, Message};
 use gladiator_llm::LlmActor;
 use gladiator_server::run_server;
 use gladiator_tools::builtin::{BashTool, EditFileTool, GlobTool, GrepTool, ReadFileTool, WriteFileTool};
+use gladiator_tools::conclusions::{GetConclusionsTool, RecordConclusionTool};
 use gladiator_tools::fixme::{GetAllFixmesTool, GetOpenFixmesTool, MarkFixmeDoneTool};
 use gladiator_tools::{ToolActorRunner, ToolRegistry};
 use std::path::PathBuf;
@@ -166,6 +167,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         registry.add(Box::new(GetAllFixmesTool::with_working_dir(&working_dir)));
         registry.add(Box::new(GetOpenFixmesTool::with_working_dir(&working_dir)));
         registry.add(Box::new(MarkFixmeDoneTool::with_working_dir(&working_dir)));
+    }
+    if config.tools.conclusions {
+        registry.add(Box::new(RecordConclusionTool::with_working_dir(&working_dir)));
+        registry.add(Box::new(GetConclusionsTool::with_working_dir(&working_dir)));
     }
     tracing::info!("Built-in tools registered: {} tools", registry.len());
 
