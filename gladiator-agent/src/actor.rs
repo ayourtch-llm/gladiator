@@ -81,6 +81,107 @@ impl AgentActor {
         self
     }
 
+    /// After a tool call resolves, check whether the whole batch is now
+    /// complete. If so, drain any user messages that arrived mid-execution,
+    /// honour the iteration cap, and dispatch the next LLM turn. Shared by the
+    /// external-tool result path and the internal-tool inline path so the
+    /// follow-up logic stays in exactly one place.
+    async fn advance_turn_if_resolved(
+        &self,
+        bus: &Bus,
+        state: &Arc<tokio::sync::Mutex<ConversationState>>,
+    ) {
+        let mut s = state.lock().await;
+        if !s.all_tool_calls_resolved() {
+            return;
+        }
+        let pending = s.drain_pending_messages();
+        if !pending.is_empty() {
+            s.reset_iteration();
+            for m in &pending {
+                s.add_user_message(m.clone());
+                let displayed_msg = Message::new(
+                    &self.stream_output_topic,
+                    &self.id(),
+                    m.clone(),
+                )
+                .with_type("UserMessageDisplayed");
+                let _ = bus.publish(&self.id(), displayed_msg).await;
+            }
+        }
+        if s.max_reached(self.max_iterations) {
+            drop(s);
+            let warn_msg = Message::new(
+                &self.stream_output_topic,
+                &self.id(),
+                format!("Max iterations ({}) reached", self.max_iterations),
+            )
+            .with_type("Warning");
+            let _ = bus.publish(&self.id(), warn_msg).await;
+        } else {
+            let messages = s.build_messages_with_system(&self.system_message);
+            drop(s);
+            if let Err(e) = self.send_conversation(bus, &messages).await {
+                error!("Failed to send tool results to LLM: {}", e);
+            }
+        }
+    }
+
+    /// Handle an agent-internal tool call (e.g. todo_write/todo_read) directly
+    /// against in-memory state. Returns the tool-result text and success flag.
+    /// These never reach a `ToolActorRunner`, so no execute message is
+    /// published on the bus.
+    async fn handle_internal_tool(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        state: &Arc<tokio::sync::Mutex<ConversationState>>,
+    ) -> (String, bool) {
+        match name {
+            "todo_write" => {
+                let raw_todos = match args.get("todos").and_then(|t| t.as_array()) {
+                    Some(arr) => arr,
+                    None => return ("Missing 'todos' array".to_string(), false),
+                };
+                let mut entries = Vec::with_capacity(raw_todos.len());
+                for (i, raw) in raw_todos.iter().enumerate() {
+                    match crate::todo::TodoEntry::from_json(raw) {
+                        Ok(e) => entries.push(e),
+                        Err(e) => {
+                            return (
+                                format!("todos[{}]: {}", i, e),
+                                false,
+                            )
+                        }
+                    }
+                }
+                // Enforce at most one in_progress item (matches the contract
+                // advertised in the tool description); coerce extras to pending.
+                let mut seen_in_progress = false;
+                for e in &mut entries {
+                    if e.status == crate::todo::TodoStatus::InProgress {
+                        if seen_in_progress {
+                            e.status = crate::todo::TodoStatus::Pending;
+                        } else {
+                            seen_in_progress = true;
+                        }
+                    }
+                }
+                let summary = {
+                    let mut s = state.lock().await;
+                    s.set_todos(entries)
+                };
+                info!("Agent {} updated todos:\n{}", self.index, summary);
+                (summary, true)
+            }
+            "todo_read" => {
+                let s = state.lock().await;
+                (s.todos_render(), true)
+            }
+            _ => (format!("Unknown internal tool: {}", name), false),
+        }
+    }
+
     async fn send_conversation(
         &self,
         bus: &Bus,
@@ -344,6 +445,42 @@ impl Actor for AgentActor {
                                     }
                                 };
 
+                                // Agent-internal tools (todo_write/todo_read) are handled inline
+                                // against ConversationState — they never go to a ToolActorRunner,
+                                // so no execute message is published on the bus.
+                                if crate::todo::is_internal_tool(&func_name) {
+                                    info!("Agent {} handling internal tool: {}", self.index, func_name);
+                                    let tool_status = Message::new(
+                                        &self.stream_output_topic,
+                                        &self.id(),
+                                        format!("Calling tool: {}({})", func_name, func_args_str),
+                                    ).with_type("Info");
+                                    let _ = bus.publish(&self.id(), tool_status).await;
+
+                                    let (result_text, success) =
+                                        self.handle_internal_tool(&func_name, &args, &state).await;
+                                    let display_snapshot = result_text.clone();
+                                    {
+                                        let mut s = state.lock().await;
+                                        s.add_tool_result(&tool_call_id, &func_name, result_text, success);
+                                        s.resolve_tool_call(&tool_call_id);
+                                    }
+                                    let stream_msg = Message::new(
+                                        &self.stream_output_topic,
+                                        &self.id(),
+                                        format!("  [tool_{}] {}({}) => {}",
+                                            if success { "result" } else { "error" },
+                                            func_name,
+                                            tool_call_id,
+                                            display_snapshot,
+                                        ),
+                                    ).with_type("LlmToolResult");
+                                    let _ = bus.publish(&self.id(), stream_msg).await;
+
+                                    self.advance_turn_if_resolved(bus, &state).await;
+                                    continue;
+                                }
+
                                 info!("Agent {} dispatching tool call: {}({})", self.index, func_name, func_args_str);
 
                                 // Publish tool call status to TUI
@@ -411,43 +548,7 @@ impl Actor for AgentActor {
                             ).with_type("LlmToolResult");
                             let _ = bus.publish(&self.id(), stream_msg).await;
 
-                            {
-                                let mut s = state.lock().await;
-                                if s.all_tool_calls_resolved() {
-                                    // Drain pending user messages first. If any arrived
-                                    // during tool execution, reset the iteration counter
-                                    // so the agent gets a fresh budget for the new turn.
-                                    let pending = s.drain_pending_messages();
-                                    if !pending.is_empty() {
-                                        s.reset_iteration();
-                                        for m in &pending {
-                                            s.add_user_message(m.clone());
-                                            // Notify TUI that this pending message is now displayed
-                                            let displayed_msg = Message::new(
-                                                &self.stream_output_topic,
-                                                &self.id(),
-                                                m.clone(),
-                                            ).with_type("UserMessageDisplayed");
-                                            let _ = bus.publish(&self.id(), displayed_msg).await;
-                                        }
-                                    }
-                                    if s.max_reached(self.max_iterations) {
-                                        drop(s);
-                                        let warn_msg = Message::new(
-                                            &self.stream_output_topic,
-                                            &self.id(),
-                                            format!("Max iterations ({}) reached", self.max_iterations),
-                                        ).with_type("Warning");
-                                        let _ = bus.publish(&self.id(), warn_msg).await;
-                                    } else {
-                                        let messages = s.build_messages_with_system(&self.system_message);
-                                        drop(s);
-                                        if let Err(e) = self.send_conversation(bus, &messages).await {
-                                            error!("Failed to send tool results to LLM: {}", e);
-                                        }
-                                    }
-                                }
-                            }
+                            self.advance_turn_if_resolved(bus, &state).await;
                         }
                         Err(RecvError::Lagged(n)) => warn!("Agent {} tool_results lagged: {}", self.index, n),
                         Err(RecvError::Closed) => break,

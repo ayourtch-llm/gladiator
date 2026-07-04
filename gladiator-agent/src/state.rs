@@ -1,3 +1,4 @@
+use crate::todo::{render_todos, TodoEntry};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -8,6 +9,11 @@ pub struct ConversationState {
     pub pending_tool_calls: HashSet<String>,
     pub pending_messages: Vec<String>,
     pub was_interrupted: bool,
+    /// Transient agent-internal todo list. Saved/restored with the rest of the
+    /// conversation state (not a separate disk file). Manipulated by the
+    /// internal `todo_write` / `todo_read` tools, handled inline by the agent.
+    #[serde(default)]
+    pub todos: Vec<TodoEntry>,
     /// Accumulated reasoning from LlmThinking stream chunks.
     /// Transient: not serialized (see #[serde(skip)]). Attached to the
     /// next assistant/tool_calls message via "reasoning" field.
@@ -251,5 +257,17 @@ impl ConversationState {
             result.push(m);
         }
         result
+    }
+
+    /// Replace the entire todo list with `entries`. Returns the rendered
+    /// summary that callers can feed back as the tool result.
+    pub fn set_todos(&mut self, entries: Vec<TodoEntry>) -> String {
+        self.todos = entries;
+        render_todos(&self.todos)
+    }
+
+    /// Rendered snapshot of the current todo list (empty-safe).
+    pub fn todos_render(&self) -> String {
+        render_todos(&self.todos)
     }
 }

@@ -239,7 +239,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         config.topics.agent_stream.clone(),
         config.agent.clone(),
     )
-    .with_tool_defs(registry.syntaxes().iter().map(|s| s.to_openai_json()).collect())
+    .with_tool_defs({
+        let mut defs: Vec<serde_json::Value> =
+            registry.syntaxes().iter().map(|s| s.to_openai_json()).collect();
+        defs.extend(gladiator_agent::todo::internal_tool_defs());
+        defs
+    })
     .with_state_topics(config.topics.agent_state_control.clone(), config.topics.agent_state.clone());
 
     let agent_handle = bus.spawn_actor(agent_actor).await?;

@@ -356,3 +356,170 @@ async fn test_agent_max_iterations() {
     // Cleanup
     agent_handle.stop().await;
 }
+
+/// Internal todo tools are handled inline by the agent — no execute message is
+/// published on the bus, the tool result is recorded in ConversationState, and
+/// the turn advances so the model sees its own plan.
+#[tokio::test]
+async fn test_agent_internal_todo_write_advances_turn() {
+    let bus = Bus::new();
+
+    let llm_in = "llm:in";
+    let llm_out = "llm:out";
+    let llm_stream = "llm:stream";
+    let llm_tool_calls = "llm:tool_calls";
+    let tool_results = "tool:results";
+    let agent_in = "agent:in";
+    let agent_stream = "agent:stream";
+
+    for topic in &[
+        llm_in, llm_out, llm_stream, llm_tool_calls, tool_results, agent_in, agent_stream,
+    ] {
+        bus.create_topic(topic, 100).await;
+    }
+
+    // Mock LLM
+    bus.register_announcement(gladiator_core::ActorAnnouncement {
+        id: "mock-llm".to_string(),
+        subscriptions: vec![llm_in.to_string()],
+        publications: vec![llm_out.to_string(), llm_stream.to_string(), llm_tool_calls.to_string()],
+    })
+    .await;
+    let mut llm_rx = bus.subscribe("mock-llm", llm_in).await.unwrap();
+
+    // Spy on the execute topic to prove nothing is dispatched for internal tools.
+    let exec_topic = "tool:todo_write:execute";
+    bus.create_topic(exec_topic, 100).await;
+    bus.register_announcement(gladiator_core::ActorAnnouncement {
+        id: "spy-exec".to_string(),
+        subscriptions: vec![],
+        publications: vec![exec_topic.to_string()],
+    })
+    .await;
+    let mut exec_rx = bus.subscribe("spy-exec", exec_topic).await.unwrap();
+
+    // Agent with the internal todo tool defs appended.
+    let mut tool_defs = gladiator_agent::todo::internal_tool_defs();
+    tool_defs.push(serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": "bash", "description": "Run a bash command",
+            "parameters": {"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}
+        }
+    }));
+    let agent = AgentActor::new(
+        0, agent_in.to_string(),
+        llm_in.to_string(),   llm_out.to_string(),
+        llm_stream.to_string(), llm_tool_calls.to_string(),
+        tool_results.to_string(), agent_stream.to_string(),
+        AgentConfig::default(),
+    )
+    .with_tool_defs(tool_defs);
+    let agent_handle = bus.spawn_actor(agent).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Drive with user input.
+    bus.register_announcement(gladiator_core::ActorAnnouncement {
+        id: "test-user".to_string(),
+        subscriptions: vec![],
+        publications: vec![agent_in.to_string()],
+    })
+    .await;
+    let _ = bus
+        .publish("test-user", Message::new(agent_in, "test-user", "plan it").with_type("UserInput"))
+        .await;
+
+    // Initial request reaches llm_in.
+    let _ = timeout(Duration::from_secs(5), llm_rx.recv())
+        .await
+        .expect("initial LLM request");
+
+    // Mock replies with a todo_write tool call.
+    let todo_call = serde_json::json!([{
+        "id": "call_todo_1", "type": "function",
+        "function": {
+            "name": "todo_write",
+            "arguments": "{\"todos\":[{\"content\":\"step one\",\"status\":\"in_progress\",\"priority\":\"high\"},{\"content\":\"step two\",\"status\":\"pending\"}]}"
+        }
+    }]);
+    bus.publish(
+        "mock-llm",
+        Message::new(llm_tool_calls, "mock-llm", todo_call).with_type("LlmToolCalls"),
+    )
+    .await
+    .unwrap();
+
+    // Critical: agent must send a follow-up request to llm_in despite no
+    // executor having been dispatched (the internal tool was handled inline).
+    let second_req = timeout(Duration::from_secs(5), llm_rx.recv())
+        .await
+        .expect("timed out waiting for follow-up after internal todo_write")
+        .unwrap();
+    let parsed: LlmRequest =
+        serde_json::from_value(second_req.payload).expect("parse follow-up LlmRequest");
+    let messages = parsed.messages.expect("messages in follow-up");
+
+    // History must contain a tool-role entry whose content is the rendered plan.
+    let tool_msg = messages
+        .iter()
+        .find(|m| m["role"] == "tool" && m["name"] == "todo_write")
+        .expect("expected todo_write tool result in history");
+    let content = tool_msg["content"].as_str().unwrap_or("");
+    assert!(content.contains("step one"), "rendered plan missing 'step one': {}", content);
+    assert!(content.contains("[~]"), "expected in_progress glyph: {}", content);
+
+    // No execute message should have leaked onto the bus.
+    let leaked = timeout(Duration::from_millis(150), exec_rx.recv()).await;
+    assert!(leaked.is_err(), "internal tool must not dispatch an executor");
+
+    agent_handle.stop().await;
+}
+
+/// ConversationState serializes its todos so they survive save/load.
+#[test]
+fn test_conversation_state_todos_roundtrip_through_serde() {
+    use gladiator_agent::{ConversationState, TodoEntry, TodoStatus};
+
+    let mut state = ConversationState::new();
+    state.add_user_message("plan the work");
+    state.set_todos(vec![
+        TodoEntry {
+            content: "implement feature".into(),
+            status: TodoStatus::InProgress,
+            priority: "high".into(),
+        },
+        TodoEntry {
+            content: "write tests".into(),
+            status: TodoStatus::Pending,
+            priority: "medium".into(),
+        },
+    ]);
+
+    let json = serde_json::to_string(&state).unwrap();
+    assert!(json.contains("implement feature"), "todos missing from serialized state");
+    assert!(json.contains("in_progress"), "status missing from serialized state");
+
+    let restored: ConversationState = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored.todos.len(), 2);
+    assert_eq!(restored.todos[0].content, "implement feature");
+    assert_eq!(restored.todos[0].status, TodoStatus::InProgress);
+    assert_eq!(restored.todos[1].status, TodoStatus::Pending);
+    assert_eq!(restored.messages.len(), 1);
+}
+
+/// A state file written before the todos field existed (no "todos" key) must
+/// still load cleanly — the field defaults to empty via #[serde(default)].
+#[test]
+fn test_conversation_state_loads_without_todos_key() {
+    use gladiator_agent::ConversationState;
+
+    let legacy = serde_json::json!({
+        "messages": [{"role": "user", "content": "hi"}],
+        "iteration_count": 0,
+        "pending_tool_calls": [],
+        "pending_messages": [],
+        "was_interrupted": false
+    });
+    let state: ConversationState = serde_json::from_value(legacy).unwrap();
+    assert!(state.todos.is_empty(), "missing todos key must default to empty");
+}
