@@ -25,8 +25,27 @@ pub fn bus_to_app_message(msg: &Message) -> Option<AppMessage> {
                     .and_then(|f| f.get("arguments"))
                     .and_then(|a| a.as_str())
                     .unwrap_or("");
+
+                // If this is an edit_file / plan_edits call with complete
+                // arguments, render the change as a unified-diff instead of
+                // raw JSON.
+                let parsed_args = serde_json::from_str::<serde_json::Value>(args).ok();
                 let content = if !name.is_empty() && !args.is_empty() {
-                    format!("{}({})", name, args)
+                    if let Some(ref p) = parsed_args {
+                        if let Some(diff) = crate::diff_render::render_tool_diff(name, p) {
+                            format!("{} \n{}", name, diff)
+                        } else {
+                            format!("{}({})", name, args)
+                        }
+                    } else {
+                        // Arguments still being built (partial JSON) — show
+                        // the in-progress call without a diff.
+                        if !name.is_empty() && parsed_args.is_none() && !args.contains("{") {
+                            format!("{}(building...)", name)
+                        } else {
+                            format!("{}({})", name, args)
+                        }
+                    }
                 } else if !name.is_empty() {
                     format!("{}(building...)", name)
                 } else {

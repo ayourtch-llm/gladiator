@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod diff_render;
 pub mod event;
 pub mod state;
 pub mod theme;
