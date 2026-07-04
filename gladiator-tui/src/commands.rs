@@ -6,6 +6,7 @@ pub enum TuiCommand {
     Save(String),
     Load(String),
     Fixme(String),
+    Debug(bool),
 }
 
 /// Parse a user input string for TUI commands.
@@ -28,6 +29,10 @@ pub fn parse_tui_command(text: &str) -> Option<TuiCommand> {
         if !phrase.is_empty() {
             return Some(TuiCommand::Fixme(phrase.to_string()));
         }
+    } else if trimmed == "/debug" || trimmed == "/debug on" {
+        return Some(TuiCommand::Debug(true));
+    } else if trimmed == "/debug off" {
+        return Some(TuiCommand::Debug(false));
     }
     None
 }
@@ -112,5 +117,28 @@ mod tests {
     fn parse_fixme_no_phrase() {
         assert_eq!(parse_tui_command("/fixme"), None);
         assert_eq!(parse_tui_command("/fixme "), None);
+    }
+
+    #[test]
+    fn parse_debug_on() {
+        assert_eq!(parse_tui_command("/debug"), Some(TuiCommand::Debug(true)));
+        assert_eq!(parse_tui_command("/debug on"), Some(TuiCommand::Debug(true)));
+    }
+
+    #[test]
+    fn parse_debug_off() {
+        assert_eq!(parse_tui_command("/debug off"), Some(TuiCommand::Debug(false)));
+    }
+
+    #[test]
+    fn parse_debug_with_trailing_whitespace() {
+        assert_eq!(
+            parse_tui_command("/debug on   "),
+            Some(TuiCommand::Debug(true))
+        );
+        assert_eq!(
+            parse_tui_command("/debug off   "),
+            Some(TuiCommand::Debug(false))
+        );
     }
 }

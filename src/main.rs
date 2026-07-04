@@ -8,7 +8,13 @@ use gladiator_tools::conclusions::{GetConclusionsTool, RecordConclusionTool};
 use gladiator_tools::fixme::{CreateFixmeTool, GetAllFixmesTool, GetOpenFixmesTool, MarkFixmeDoneTool};
 use gladiator_tools::{ToolActorRunner, ToolRegistry};
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use clap::Parser;
+use tracing_subscriber::util::SubscriberInitExt;
+
+mod debug_layer;
+use debug_layer::ChatMakeWriter;
 
 #[derive(Parser)]
 struct Cli {
@@ -104,10 +110,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let port = cli.port;
     let no_tui = cli.no_tui;
 
+    // Debug flag: when enabled, tracing events are routed into the chat via the bus.
+    let debug_flag = Arc::new(AtomicBool::new(false));
+    let (log_tx, mut log_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
     // In TUI mode, redirect tracing to a file so it doesn't corrupt the terminal.
     // In headless mode, use stderr as normal.
+    // In both modes, add a chat layer that routes events to the bus when debug is on.
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "info".into());
+    let chat_make_writer = ChatMakeWriter::new(debug_flag.clone(), log_tx);
     if !no_tui {
         match std::fs::OpenOptions::new()
             .create(true)
@@ -117,20 +129,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         {
             Ok(log_file) => {
                 let log_writer = std::sync::Arc::new(log_file);
-                tracing_subscriber::fmt()
-                    .with_env_filter(env_filter)
-                    .with_writer(log_writer)
+                use tracing_subscriber::layer::SubscriberExt;
+                let fmt_layer = tracing_subscriber::fmt::layer()
+                    .with_writer(log_writer);
+                let chat_layer = tracing_subscriber::fmt::layer()
+                    .with_writer(chat_make_writer);
+                tracing_subscriber::registry()
+                    .with(env_filter)
+                    .with(fmt_layer)
+                    .with(chat_layer)
                     .init();
             }
             Err(_) => {
-                tracing_subscriber::fmt()
-                    .with_env_filter(env_filter)
+                use tracing_subscriber::layer::SubscriberExt;
+                let chat_layer = tracing_subscriber::fmt::layer()
+                    .with_writer(chat_make_writer);
+                tracing_subscriber::registry()
+                    .with(env_filter)
+                    .with(chat_layer)
                     .init();
             }
         }
     } else {
-        tracing_subscriber::fmt()
-            .with_env_filter(env_filter)
+        use tracing_subscriber::layer::SubscriberExt;
+        let stderr_layer = tracing_subscriber::fmt::layer();
+        let chat_layer = tracing_subscriber::fmt::layer()
+            .with_writer(chat_make_writer);
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(stderr_layer)
+            .with(chat_layer)
             .init();
     }
 
@@ -247,10 +275,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Register the agent input topic subscriber so the TUI can publish to it
     bus.register_announcement(gladiator_core::ActorAnnouncement {
         id: "gladiator-tui".to_string(),
-        subscriptions: vec![config.topics.agent_stream.clone(), config.topics.persistence_response.clone()],
+        subscriptions: vec![config.topics.agent_stream.clone(), config.topics.persistence_response.clone(), config.topics.log.clone()],
         publications: vec![config.topics.agent_in.clone(), config.topics.user_control.clone(), config.topics.persistence_command.clone()],
     })
     .await;
+
+    // Register the debug tracing publisher so it can publish log events to the bus
+    bus.register_announcement(gladiator_core::ActorAnnouncement {
+        id: "gladiator-debug".to_string(),
+        subscriptions: vec![],
+        publications: vec![config.topics.log.clone()],
+    })
+    .await;
+
+    // Spawn background task to bridge tracing log lines → bus log topic
+    {
+        let log_bus = bus.clone();
+        let log_topic = config.topics.log.clone();
+        tokio::spawn(async move {
+            while let Some(line) = log_rx.recv().await {
+                let msg = Message::new(&log_topic, "gladiator-debug", line)
+                    .with_type("Log");
+                let _ = log_bus.publish("gladiator-debug", msg).await;
+            }
+        });
+    }
 
     if no_tui {
         // Headless mode: just keep running
@@ -275,7 +324,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         });
 
         // Run TUI app
-        match gladiator_tui::app::run_app(bus.clone(), user_input_tx, &config.topics, &config.agent.working_dir).await {
+        match gladiator_tui::app::run_app(bus.clone(), user_input_tx, &config.topics, &config.agent.working_dir, debug_flag.clone()).await {
             Ok(()) => {}
             Err(e) => tracing::error!("TUI error: {}", e),
         }

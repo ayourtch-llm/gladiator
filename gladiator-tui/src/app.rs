@@ -7,6 +7,8 @@ use gladiator_core::bus::Bus;
 use gladiator_core::config::TopicsConfig;
 use gladiator_core::message::Message;
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use crossterm::event::{
     self, DisableBracketedPaste, EnableBracketedPaste, Event as CrosstermEvent, KeyCode, KeyEvent,
@@ -587,6 +589,7 @@ pub async fn run_app(
     user_input_tx: mpsc::UnboundedSender<String>,
     topics: &TopicsConfig,
     working_dir: &str,
+    debug_flag: Arc<AtomicBool>,
 ) -> io::Result<()> {
     let theme = Theme::default_dark();
     let mut app = App::new(theme);
@@ -601,6 +604,7 @@ pub async fn run_app(
         topics.llm_tool_calls.clone(),
         topics.llm_stats.clone(),
         topics.persistence_response.clone(),
+        topics.log.clone(),
     ];
 
     let mut rx_handles = Vec::new();
@@ -731,6 +735,21 @@ pub async fn run_app(
                                                         &format!("Failed to add fixme: {}", e),
                                                     ));
                                                 }
+                                            }
+                                            app.scroll_mut().scroll_to_bottom();
+                                        }
+                                        TuiCommand::Debug(enabled) => {
+                                            debug_flag.store(enabled, Ordering::Relaxed);
+                                            if enabled {
+                                                app.chat_mut().add_message(AppMessage::system(
+                                                    "Debug mode enabled — tracing output will appear in chat",
+                                                ));
+                                                app.set_status("Debug: ON");
+                                            } else {
+                                                app.chat_mut().add_message(AppMessage::system(
+                                                    "Debug mode disabled",
+                                                ));
+                                                app.set_status("Debug: OFF");
                                             }
                                             app.scroll_mut().scroll_to_bottom();
                                         }
