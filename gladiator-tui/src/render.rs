@@ -291,23 +291,30 @@ impl Renderer {
             }
 
             if i == cursor_line {
-                // Render with cursor highlight
+                // Render with cursor highlight on the character at cursor position.
+                // No extra cell inserted — the char at cursor gets the cursor style.
                 let before: String = line[..cursor_col].chars().collect();
-                let after: String = line[cursor_col..].chars().collect();
+                let rest: String = line[cursor_col..].chars().collect();
                 spans.push(Span::styled(
                     before,
                     Style::default().fg(self.theme.color_text()),
                 ));
-                spans.push(Span::styled(
-                    " ",
-                    Style::default()
-                        .bg(self.theme.color_primary())
-                        .fg(self.theme.color_primary()),
-                ));
-                spans.push(Span::styled(
-                    after,
-                    Style::default().fg(self.theme.color_text()),
-                ));
+                let cursor_style = Style::default()
+                    .bg(self.theme.color_primary())
+                    .fg(self.theme.color_background());
+                if !rest.is_empty() {
+                    // Highlight the char at cursor position
+                    let first_char: String = rest.chars().take(1).collect();
+                    let after: String = rest.chars().skip(1).collect();
+                    spans.push(Span::styled(first_char, cursor_style));
+                    spans.push(Span::styled(
+                        after,
+                        Style::default().fg(self.theme.color_text()),
+                    ));
+                } else {
+                    // Cursor at end of line: show empty block cursor
+                    spans.push(Span::styled(" ", cursor_style));
+                }
             } else {
                 spans.push(Span::styled(
                     *line,
