@@ -6,6 +6,28 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
+/// Count the number of visual lines needed to display the input buffer,
+/// accounting for hard-wrapping at the available width. The first logical
+/// line is shorter by `prompt_len` (the "> " prefix).
+fn count_input_visual_lines(buffer: &str, width: usize, prompt_len: usize) -> usize {
+    let logical_lines: Vec<&str> = buffer.split('\n').collect();
+    let mut count = 0usize;
+    for (i, line) in logical_lines.iter().enumerate() {
+        let avail = if i == 0 {
+            width.saturating_sub(prompt_len).max(1)
+        } else {
+            width.max(1)
+        };
+        let chars_count = line.chars().count();
+        if chars_count == 0 {
+            count += 1;
+        } else {
+            count += (chars_count + avail - 1) / avail;
+        }
+    }
+    count.max(1)
+}
+
 /// Hard-wrap text into visual lines, preserving all whitespace including
 /// leading spaces, tabs, and multiple spaces. Newlines in the content produce
 /// line breaks. Each sub-line is hard-wrapped at the available width.
@@ -66,10 +88,16 @@ impl Renderer {
         status_text: &str,
     ) {
         let area = frame.area();
+        let term_width = area.width as usize;
 
-        // Dynamic input height based on number of lines in buffer
-        let input_lines = input.buffer().lines().count().max(1);
-        let input_height = (input_lines + 1).min(8) as u16; // +1 for top border, max 8
+        // Dynamic input height based on visual lines (hard-wrapped at width).
+        // +1 for top border, capped at half the terminal height.
+        let prompt_len = 2; // "> "
+        let input_visual_lines =
+            count_input_visual_lines(input.buffer(), term_width, prompt_len);
+        let input_height = (input_visual_lines + 1) as u16;
+        let max_input_height = (area.height / 2).max(3);
+        let input_height = input_height.min(max_input_height);
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -250,60 +278,118 @@ impl Renderer {
             .style(Style::default().bg(self.theme.color_background_panel()));
 
         let prompt_str = "> ";
+        let prompt_len: usize = 2; // "> ".chars().count()
         let cursor_pos = input.cursor();
         let buffer = input.buffer();
+        let width = area.width as usize;
 
-        // Split buffer into lines by newline for multi-line rendering
-        let lines: Vec<&str> = buffer.split('\n').collect();
+        // Split buffer into logical lines by newline
+        let logical_lines: Vec<&str> = buffer.split('\n').collect();
 
-        // Find which line the cursor is on and the offset within that line
-        let mut char_count = 0usize;
-        let mut cursor_line = 0;
-        let mut cursor_col = 0usize; // byte offset within the line
-        for (i, line) in lines.iter().enumerate() {
+        // Find which logical line the cursor is on and byte offset within it
+        let mut cursor_logical_line = 0usize;
+        let mut cursor_byte_in_line = 0usize;
+        let mut byte_count = 0usize;
+        for (i, line) in logical_lines.iter().enumerate() {
             let line_len = line.len();
-            if cursor_pos <= char_count + line_len {
-                cursor_line = i;
-                cursor_col = cursor_pos - char_count;
+            if cursor_pos <= byte_count + line_len {
+                cursor_logical_line = i;
+                cursor_byte_in_line = cursor_pos - byte_count;
                 break;
             }
-            char_count += line_len + 1; // +1 for the newline
-            if i == lines.len() - 1 {
-                cursor_line = i;
-                cursor_col = line_len;
+            byte_count += line_len + 1; // +1 for newline
+            cursor_logical_line = i;
+            cursor_byte_in_line = line_len;
+        }
+        // Edge case: cursor at end of buffer
+        if cursor_pos == buffer.len() {
+            cursor_logical_line = logical_lines.len() - 1;
+            cursor_byte_in_line = logical_lines[cursor_logical_line].len();
+        }
+
+        // Convert byte offset to char offset within the logical line
+        let cursor_line_str = logical_lines[cursor_logical_line];
+        let cursor_char_in_line = cursor_line_str[..cursor_byte_in_line].chars().count();
+
+        // Build visual lines with hard-wrapping, tracking cursor position
+        let mut visual_lines: Vec<String> = Vec::new();
+        let mut cursor_visual_line = 0usize;
+        let mut cursor_visual_col = 0usize;
+        let mut found_cursor = false;
+
+        for (i, line) in logical_lines.iter().enumerate() {
+            let avail = if i == 0 {
+                width.saturating_sub(prompt_len).max(1)
+            } else {
+                width.max(1)
+            };
+            let chars: Vec<char> = line.chars().collect();
+            let mut pos = 0usize;
+            loop {
+                let end = (pos + avail).min(chars.len());
+                let chunk: String = chars[pos..end].iter().collect();
+
+                // Check if cursor is on this visual line
+                if !found_cursor && i == cursor_logical_line {
+                    if cursor_char_in_line >= pos && cursor_char_in_line < end {
+                        cursor_visual_line = visual_lines.len();
+                        cursor_visual_col = cursor_char_in_line - pos;
+                        found_cursor = true;
+                    } else if cursor_char_in_line == end && end >= chars.len() {
+                        // Cursor at end of logical line
+                        cursor_visual_line = visual_lines.len();
+                        cursor_visual_col = end - pos;
+                        found_cursor = true;
+                    }
+                    // else: cursor at wrap boundary — will be found on next visual line
+                }
+
+                visual_lines.push(chunk);
+
+                if end >= chars.len() {
+                    break;
+                }
+                pos = end;
             }
         }
 
-        // Handle edge case: cursor at end of last line
-        if cursor_pos == buffer.len() {
-            cursor_line = lines.len() - 1;
-            cursor_col = lines[cursor_line].len();
+        // Fallback: cursor not placed (should not happen, but safety net)
+        if !found_cursor {
+            cursor_visual_line = visual_lines.len().saturating_sub(1);
+            cursor_visual_col = visual_lines.last().map(|s| s.chars().count()).unwrap_or(0);
         }
 
+        // Ensure at least one visual line
+        if visual_lines.is_empty() {
+            visual_lines.push(String::new());
+            cursor_visual_line = 0;
+            cursor_visual_col = 0;
+        }
+
+        // Render visual lines
         let mut line_widgets: Vec<Line> = Vec::new();
-        for (i, line) in lines.iter().enumerate() {
+        for (vi, text) in visual_lines.iter().enumerate() {
             let mut spans: Vec<Span> = Vec::new();
-            if i == 0 {
+            if vi == 0 {
                 spans.push(Span::styled(
                     prompt_str,
                     Style::default().fg(self.theme.color_primary()),
                 ));
             }
 
-            if i == cursor_line {
-                // Render with cursor highlight on the character at cursor position.
-                // No extra cell inserted — the char at cursor gets the cursor style.
-                let before: String = line[..cursor_col].chars().collect();
-                let rest: String = line[cursor_col..].chars().collect();
+            if vi == cursor_visual_line {
+                let cursor_style = Style::default()
+                    .bg(self.theme.color_primary())
+                    .fg(self.theme.color_background());
+                let chars: Vec<char> = text.chars().collect();
+                let col = cursor_visual_col.min(chars.len());
+                let before: String = chars[..col].iter().collect();
+                let rest: String = chars[col..].iter().collect();
                 spans.push(Span::styled(
                     before,
                     Style::default().fg(self.theme.color_text()),
                 ));
-                let cursor_style = Style::default()
-                    .bg(self.theme.color_primary())
-                    .fg(self.theme.color_background());
                 if !rest.is_empty() {
-                    // Highlight the char at cursor position
                     let first_char: String = rest.chars().take(1).collect();
                     let after: String = rest.chars().skip(1).collect();
                     spans.push(Span::styled(first_char, cursor_style));
@@ -312,12 +398,12 @@ impl Renderer {
                         Style::default().fg(self.theme.color_text()),
                     ));
                 } else {
-                    // Cursor at end of line: show empty block cursor
+                    // Cursor at end of line: empty block cursor
                     spans.push(Span::styled(" ", cursor_style));
                 }
             } else {
                 spans.push(Span::styled(
-                    *line,
+                    text.as_str(),
                     Style::default().fg(self.theme.color_text()),
                 ));
             }
@@ -328,17 +414,14 @@ impl Renderer {
         let para = Paragraph::new(line_widgets).block(block);
         frame.render_widget(para, area);
 
-        // Position the terminal cursor at the input cursor location.
-        // Only line 0 has the "> " prefix, so lines > 0 start at area.left().
-        let prompt_len: u16 = 2; // "> "
-        let cursor_line_str = lines[cursor_line];
-        let cursor_col_chars = cursor_line_str[..cursor_col].chars().count() as u16;
-        let cursor_x = if cursor_line == 0 {
-            area.left() + prompt_len + cursor_col_chars
+        // Position terminal cursor at the input cursor location.
+        // Only visual line 0 has the "> " prefix.
+        let cursor_x = if cursor_visual_line == 0 {
+            area.left() + prompt_len as u16 + cursor_visual_col as u16
         } else {
-            area.left() + cursor_col_chars
+            area.left() + cursor_visual_col as u16
         };
-        let cursor_y = area.top() + 1 + cursor_line as u16; // +1 for top border
+        let cursor_y = area.top() + 1 + cursor_visual_line as u16; // +1 for top border
         frame.set_cursor_position((cursor_x, cursor_y));
     }
 
