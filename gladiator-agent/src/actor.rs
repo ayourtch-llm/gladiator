@@ -373,7 +373,7 @@ impl Actor for AgentActor {
                             let _ = bus.publish(&self.id(), stream_msg).await;
 
                             {
-                                let s = state.lock().await;
+                                let mut s = state.lock().await;
                                 if s.all_tool_calls_resolved() {
                                     if s.max_reached(self.max_iterations) {
                                         drop(s);
@@ -384,6 +384,10 @@ impl Actor for AgentActor {
                                         ).with_type("Warning");
                                         let _ = bus.publish(&self.id(), warn_msg).await;
                                     } else {
+                                        let pending = s.drain_pending_messages();
+                                        for m in pending {
+                                            s.add_user_message(m);
+                                        }
                                         let messages = s.build_messages_with_system(&self.system_message);
                                         drop(s);
                                         if let Err(e) = self.send_conversation(bus, &messages).await {
