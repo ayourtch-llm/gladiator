@@ -387,16 +387,29 @@ impl Actor for LlmActor {
                                 std::future::pending().await
                             }
                         } => {
-                            match request_result {
-                                Ok(Ok((full_response, tool_calls))) => {
-                                    if !tool_calls.is_empty() {
-                                        let tc_msg = gladiator_core::Message::new(
-                                            &self.tool_calls_topic,
-                                            &self.id(),
-                                            serde_json::to_value(&tool_calls).unwrap(),
-                                        ).with_type("LlmToolCalls");
-                                        let _ = bus.publish(&self.id(), tc_msg).await;
-                                    } else {
+                                match request_result {
+                                    Ok(Ok((full_response, mut tool_calls))) => {
+                                        if !tool_calls.is_empty() {
+                                            // Tool call arguments arrive as a concatenation of streamed
+                                            // string deltas; a dropped chunk can leave the accumulated
+                                            // arguments as truncated JSON. Try to repair in place before
+                                            // publishing so subscribers always see parseable args when
+                                            // recovery is possible.
+                                            let repaired = crate::args_fixer::repair_tool_calls(&mut tool_calls);
+                                            if repaired > 0 {
+                                                tracing::warn!(
+                                                    "[llm{}] repaired {} tool call argument payload(s) that failed JSON validation",
+                                                    self.index,
+                                                    repaired
+                                                );
+                                            }
+                                            let tc_msg = gladiator_core::Message::new(
+                                                &self.tool_calls_topic,
+                                                &self.id(),
+                                                serde_json::to_value(&tool_calls).unwrap(),
+                                            ).with_type("LlmToolCalls");
+                                            let _ = bus.publish(&self.id(), tc_msg).await;
+                                        } else {
                                         let out_msg = gladiator_core::Message::new(
                                             &self.output_topic,
                                             &self.id(),
