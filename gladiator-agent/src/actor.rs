@@ -286,6 +286,7 @@ impl Actor for AgentActor {
                             {
                                 let mut s = state.lock().await;
                                 s.add_tool_calls(tool_calls.clone());
+                                s.increment_iteration();
                             }
 
                             for tc in &tool_calls {
