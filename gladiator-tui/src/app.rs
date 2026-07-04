@@ -30,6 +30,7 @@ pub struct App {
     should_quit: bool,
     last_stream_type: Option<String>,
     last_tool_call_index: Option<usize>,
+    terminal_width: usize,
 }
 
 impl App {
@@ -43,6 +44,7 @@ impl App {
             should_quit: false,
             last_stream_type: None,
             last_tool_call_index: None,
+            terminal_width: 80,
         }
     }
 
@@ -80,6 +82,17 @@ impl App {
 
     pub fn quit(&mut self) {
         self.should_quit = true;
+    }
+
+    /// Set the terminal width (columns) used for visual line movement decisions.
+    pub fn set_terminal_width(&mut self, width: usize) {
+        if width > 0 {
+            self.terminal_width = width;
+        }
+    }
+
+    pub fn terminal_width(&self) -> usize {
+        self.terminal_width
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<String> {
@@ -198,13 +211,18 @@ impl App {
                 None
             }
 
-            // Up/Down: history (or scroll with Shift)
+            // Up/Down: visual line movement (if multiline) or history navigation.
+            // Shift+Up/Down always scrolls.
             KeyCode::Up if shift => {
                 self.scroll.scroll_up();
                 None
             }
             KeyCode::Up => {
-                self.input.history_prev();
+                if self.input.is_multiline(self.terminal_width, InputState::PROMPT_LEN) {
+                    self.input.cursor_up(self.terminal_width, InputState::PROMPT_LEN);
+                } else {
+                    self.input.history_prev();
+                }
                 None
             }
             KeyCode::Down if shift => {
@@ -212,7 +230,11 @@ impl App {
                 None
             }
             KeyCode::Down => {
-                self.input.history_next();
+                if self.input.is_multiline(self.terminal_width, InputState::PROMPT_LEN) {
+                    self.input.cursor_down(self.terminal_width, InputState::PROMPT_LEN);
+                } else {
+                    self.input.history_next();
+                }
                 None
             }
 
@@ -546,6 +568,11 @@ pub async fn run_app(
     // Main loop
     let tick = Duration::from_millis(50);
     loop {
+        // Update terminal width for visual line movement
+        if let Ok((cols, _)) = crossterm::terminal::size() {
+            app.set_terminal_width(cols as usize);
+        }
+
         // Render
         app.render_frame(&mut terminal);
 

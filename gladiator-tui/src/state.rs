@@ -68,7 +68,32 @@ pub struct InputState {
     last_op_was_kill: bool,
 }
 
+/// Information about a single visual line within the input buffer.
+#[derive(Debug, Clone)]
+pub struct VisualLineInfo {
+    /// Index of the logical line (0-based, split by '\n') this visual line belongs to.
+    pub logical_line: usize,
+    /// Char offset within the logical line where this visual line starts.
+    pub char_start: usize,
+    /// Number of chars in this visual line.
+    pub char_count: usize,
+}
+
+/// Visual layout of the input buffer for a given terminal width.
+#[derive(Debug, Clone)]
+pub struct VisualLayout {
+    /// All visual lines, in order.
+    pub visual_lines: Vec<VisualLineInfo>,
+    /// Index into visual_lines where the cursor is located.
+    pub cursor_visual_line: usize,
+    /// Column (char offset) within the cursor's visual line.
+    pub cursor_visual_col: usize,
+}
+
 impl InputState {
+    /// The prompt prefix length in chars ("> " = 2 chars).
+    /// Used for visual line calculations (hard-wrapping the first line).
+    pub const PROMPT_LEN: usize = 2;
     pub fn new() -> Self {
         Self {
             buffer: String::new(),
@@ -164,6 +189,203 @@ impl InputState {
         } else {
             self.cursor = self.buffer.len();
         }
+    }
+
+    /// Returns true if the buffer occupies more than one visual line at the
+    /// given terminal width (accounting for hard-wrapping and prompt prefix).
+    /// Used to decide whether Up/Down should do visual line movement vs
+    /// history navigation.
+    pub fn is_multiline(&self, width: usize, prompt_len: usize) -> bool {
+        let layout = self.visual_layout(width, prompt_len);
+        layout.visual_lines.len() > 1
+    }
+
+    /// Compute the visual layout of the buffer for a given terminal width.
+    ///
+    /// `prompt_len` is the number of chars the prompt prefix occupies on the
+    /// first logical line (e.g. 2 for "> "). `width` is the available column
+    /// width for the input area.
+    ///
+    /// Returns the full list of visual lines and the cursor's position within
+    /// that visual-line grid.
+    pub fn visual_layout(&self, width: usize, prompt_len: usize) -> VisualLayout {
+        let buffer = &self.buffer;
+        let cursor_pos = self.cursor;
+        let logical_lines: Vec<&str> = buffer.split('\n').collect();
+
+        // Find which logical line the cursor is on, and the char offset within it.
+        let mut cursor_logical_line = 0usize;
+        let mut cursor_byte_in_line = 0usize;
+        let mut byte_count = 0usize;
+        for (i, line) in logical_lines.iter().enumerate() {
+            let line_len = line.len();
+            if cursor_pos <= byte_count + line_len {
+                cursor_logical_line = i;
+                cursor_byte_in_line = cursor_pos - byte_count;
+                break;
+            }
+            byte_count += line_len + 1; // +1 for '\n'
+            cursor_logical_line = i;
+            cursor_byte_in_line = line_len;
+        }
+        // Edge case: cursor at very end of buffer
+        if cursor_pos == buffer.len() {
+            cursor_logical_line = logical_lines.len() - 1;
+            cursor_byte_in_line = logical_lines[cursor_logical_line].len();
+        }
+
+        // Convert byte offset to char offset within the logical line
+        let cursor_line_str = logical_lines[cursor_logical_line];
+        let cursor_char_in_line = cursor_line_str[..cursor_byte_in_line].chars().count();
+
+        let mut visual_lines: Vec<VisualLineInfo> = Vec::new();
+        let mut cursor_visual_line = 0usize;
+        let mut cursor_visual_col = 0usize;
+        let mut found_cursor = false;
+
+        for (i, line) in logical_lines.iter().enumerate() {
+            let avail = if i == 0 {
+                width.saturating_sub(prompt_len).max(1)
+            } else {
+                width.max(1)
+            };
+            let chars: Vec<char> = line.chars().collect();
+            let line_char_count = chars.len();
+            let mut pos = 0usize;
+            loop {
+                let end = (pos + avail).min(line_char_count);
+                let chunk_len = end - pos;
+
+                // Check if cursor is on this visual line
+                if !found_cursor && i == cursor_logical_line {
+                    if cursor_char_in_line >= pos && cursor_char_in_line < end {
+                        cursor_visual_line = visual_lines.len();
+                        cursor_visual_col = cursor_char_in_line - pos;
+                        found_cursor = true;
+                    } else if cursor_char_in_line == end && end >= line_char_count {
+                        // Cursor at end of logical line
+                        cursor_visual_line = visual_lines.len();
+                        cursor_visual_col = end - pos;
+                        found_cursor = true;
+                    }
+                    // else: cursor at wrap boundary — will be found on next visual line
+                }
+
+                visual_lines.push(VisualLineInfo {
+                    logical_line: i,
+                    char_start: pos,
+                    char_count: chunk_len,
+                });
+
+                if end >= line_char_count {
+                    break;
+                }
+                pos = end;
+            }
+        }
+
+        // Fallback: cursor not placed
+        if !found_cursor {
+            cursor_visual_line = visual_lines.len().saturating_sub(1);
+            cursor_visual_col = visual_lines
+                .last()
+                .map(|v| v.char_count)
+                .unwrap_or(0);
+        }
+
+        if visual_lines.is_empty() {
+            visual_lines.push(VisualLineInfo {
+                logical_line: 0,
+                char_start: 0,
+                char_count: 0,
+            });
+            cursor_visual_line = 0;
+            cursor_visual_col = 0;
+        }
+
+        VisualLayout {
+            visual_lines,
+            cursor_visual_line,
+            cursor_visual_col,
+        }
+    }
+
+    /// Move cursor up one visual line. If at the top, does nothing (stays).
+    /// Requires `width` and `prompt_len` to compute the visual layout.
+    pub fn cursor_up(&mut self, width: usize, prompt_len: usize) {
+        self.break_kill_chain();
+        let layout = self.visual_layout(width, prompt_len);
+        if layout.cursor_visual_line == 0 {
+            return; // already at top
+        }
+        let target_visual = layout.cursor_visual_line - 1;
+        let target_info = &layout.visual_lines[target_visual];
+        let target_logical = target_info.logical_line;
+
+        // Compute the byte offset of the target visual line's start within the buffer
+        let logical_lines: Vec<&str> = self.buffer.split('\n').collect();
+        let mut byte_offset_to_logical = 0usize;
+        for (i, line) in logical_lines.iter().enumerate() {
+            if i == target_logical {
+                break;
+            }
+            byte_offset_to_logical += line.len() + 1; // +1 for '\n'
+        }
+
+        let logical_str = logical_lines[target_logical];
+
+        // Target column: keep the visual column if it fits, otherwise clamp to end of target line
+        let target_col = layout.cursor_visual_col.min(target_info.char_count);
+        let mut byte_in_line = 0usize;
+        let mut col = 0usize;
+        for ch in logical_str.chars() {
+            if col >= target_col {
+                break;
+            }
+            byte_in_line += ch.len_utf8();
+            col += 1;
+        }
+
+        self.cursor = byte_offset_to_logical + byte_in_line;
+    }
+
+    /// Move cursor down one visual line. If at the bottom, does nothing (stays).
+    /// Requires `width` and `prompt_len` to compute the visual layout.
+    pub fn cursor_down(&mut self, width: usize, prompt_len: usize) {
+        self.break_kill_chain();
+        let layout = self.visual_layout(width, prompt_len);
+        if layout.cursor_visual_line + 1 >= layout.visual_lines.len() {
+            return; // already at bottom
+        }
+        let target_visual = layout.cursor_visual_line + 1;
+        let target_info = &layout.visual_lines[target_visual];
+        let target_logical = target_info.logical_line;
+
+        // Compute the byte offset of the target visual line's start within the buffer
+        let logical_lines: Vec<&str> = self.buffer.split('\n').collect();
+        let mut byte_offset_to_logical = 0usize;
+        for (i, line) in logical_lines.iter().enumerate() {
+            if i == target_logical {
+                break;
+            }
+            byte_offset_to_logical += line.len() + 1; // +1 for '\n'
+        }
+
+        let logical_str = logical_lines[target_logical];
+
+        // Target column: keep the visual column if it fits, otherwise clamp to end of target line
+        let target_col = layout.cursor_visual_col.min(target_info.char_count);
+        let mut byte_in_line = 0usize;
+        let mut col = 0usize;
+        for ch in logical_str.chars() {
+            if col >= target_col {
+                break;
+            }
+            byte_in_line += ch.len_utf8();
+            col += 1;
+        }
+
+        self.cursor = byte_offset_to_logical + byte_in_line;
     }
 
     pub fn clear(&mut self) {

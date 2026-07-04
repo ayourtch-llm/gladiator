@@ -92,7 +92,7 @@ impl Renderer {
 
         // Dynamic input height based on visual lines (hard-wrapped at width).
         // +1 for top border, capped at half the terminal height.
-        let prompt_len = 2; // "> "
+        let prompt_len = InputState::PROMPT_LEN; // "> "
         let input_visual_lines =
             count_input_visual_lines(input.buffer(), term_width, prompt_len);
         let input_height = (input_visual_lines + 1) as u16;
@@ -278,7 +278,7 @@ impl Renderer {
             .style(Style::default().bg(self.theme.color_background_panel()));
 
         let prompt_str = "> ";
-        let prompt_len: usize = 2; // "> ".chars().count()
+        let prompt_len: usize = InputState::PROMPT_LEN; // "> ".chars().count()
         let cursor_pos = input.cursor();
         let buffer = input.buffer();
         let width = area.width as usize;
