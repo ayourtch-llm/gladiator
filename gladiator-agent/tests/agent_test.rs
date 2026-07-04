@@ -154,6 +154,18 @@ fn conversation_state_max_reached() {
     assert!(state.max_reached(5));
 }
 
+#[test]
+fn conversation_state_reset_iteration() {
+    let mut state = ConversationState::new();
+    state.increment_iteration();
+    state.increment_iteration();
+    assert_eq!(state.iteration_count, 2);
+    assert!(state.max_reached(2));
+    state.reset_iteration();
+    assert_eq!(state.iteration_count, 0);
+    assert!(!state.max_reached(2));
+}
+
 // =========================================================================
 // Interrupt / message sequence repair tests
 // =========================================================================

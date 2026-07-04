@@ -192,6 +192,7 @@ impl Actor for AgentActor {
                                     s.buffer_user_message(user_message);
                                     continue;
                                 }
+                                s.reset_iteration();
                                 if s.was_interrupted {
                                     s.merge_user_message(user_message);
                                     s.was_interrupted = false;

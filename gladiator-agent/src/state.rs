@@ -220,6 +220,12 @@ impl ConversationState {
         self.iteration_count += 1;
     }
 
+    /// Reset the iteration counter to zero. Called when a new user message
+    /// arrives so the agent gets a fresh iteration budget for the new turn.
+    pub fn reset_iteration(&mut self) {
+        self.iteration_count = 0;
+    }
+
     pub fn max_reached(&self, max: u32) -> bool {
         self.iteration_count >= max
     }
