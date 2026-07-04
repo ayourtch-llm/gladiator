@@ -83,52 +83,139 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<String> {
+        let ctrl = key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(crossterm::event::KeyModifiers::ALT);
+        let shift = key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT);
+
         match key.code {
-            KeyCode::Char('c') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+            // Quit: Ctrl+C, Ctrl+Q
+            KeyCode::Char('c') if ctrl => {
                 self.quit();
                 None
             }
-            KeyCode::Char('q') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+            KeyCode::Char('q') if ctrl => {
                 self.quit();
                 None
             }
-            KeyCode::Enter => {
-                if key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT)
-                    || key.modifiers.contains(crossterm::event::KeyModifiers::ALT)
-                {
-                    self.input.insert_newline();
-                    None
-                } else {
-                    let text = self.input.submit();
-                    if !text.is_empty() {
-                        self.chat.add_message(AppMessage::user(&text));
-                        self.scroll.scroll_to_bottom();
-                        Some(text)
-                    } else {
-                        None
-                    }
-                }
-            }
-            KeyCode::Char('j') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+
+            // Enter: plain = submit, Shift/Alt+Enter = newline
+            KeyCode::Enter if shift || alt => {
                 self.input.insert_newline();
                 None
             }
-            KeyCode::Up => {
-                if key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
-                    self.scroll.scroll_up();
+            KeyCode::Enter => {
+                let text = self.input.submit();
+                if !text.is_empty() {
+                    self.chat.add_message(AppMessage::user(&text));
+                    self.scroll.scroll_to_bottom();
+                    Some(text)
                 } else {
-                    self.input.history_prev();
+                    None
                 }
+            }
+
+            // Ctrl+J = newline
+            KeyCode::Char('j') if ctrl => {
+                self.input.insert_newline();
+                None
+            }
+
+            // Emacs line-editing: Ctrl combos
+            KeyCode::Char('a') if ctrl => {
+                self.input.cursor_line_start();
+                None
+            }
+            KeyCode::Char('e') if ctrl => {
+                self.input.cursor_line_end();
+                None
+            }
+            KeyCode::Char('b') if ctrl => {
+                self.input.cursor_left();
+                None
+            }
+            KeyCode::Char('f') if ctrl => {
+                self.input.cursor_right();
+                None
+            }
+            KeyCode::Char('d') if ctrl => {
+                self.input.delete_char_forward();
+                None
+            }
+            KeyCode::Char('h') if ctrl => {
+                self.input.backspace();
+                None
+            }
+            KeyCode::Char('k') if ctrl => {
+                self.input.kill_to_end_of_line();
+                None
+            }
+            KeyCode::Char('u') if ctrl => {
+                self.input.kill_to_start_of_line();
+                None
+            }
+            KeyCode::Char('w') if ctrl => {
+                self.input.kill_word_backward();
+                None
+            }
+            KeyCode::Char('y') if ctrl => {
+                self.input.yank();
+                None
+            }
+            KeyCode::Char('p') if ctrl => {
+                self.input.history_prev();
+                None
+            }
+            KeyCode::Char('n') if ctrl => {
+                self.input.history_next();
+                None
+            }
+
+            // Alt combos (word movement, word kill, history jump)
+            KeyCode::Char('d') if alt => {
+                self.input.kill_word_forward();
+                None
+            }
+            KeyCode::Char('f') if alt => {
+                self.input.cursor_word_forward();
+                None
+            }
+            KeyCode::Char('b') if alt => {
+                self.input.cursor_word_backward();
+                None
+            }
+            KeyCode::Char('<') if alt => {
+                self.input.history_beginning();
+                None
+            }
+            KeyCode::Char('>') if alt => {
+                self.input.history_end();
+                None
+            }
+
+            // Alt+Backspace = kill word backward
+            KeyCode::Backspace if alt => {
+                self.input.kill_word_backward();
+                None
+            }
+
+            // Up/Down: history (or scroll with Shift)
+            KeyCode::Up if shift => {
+                self.scroll.scroll_up();
+                None
+            }
+            KeyCode::Up => {
+                self.input.history_prev();
+                None
+            }
+            KeyCode::Down if shift => {
+                self.scroll.scroll_down();
                 None
             }
             KeyCode::Down => {
-                if key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
-                    self.scroll.scroll_down();
-                } else {
-                    self.input.history_next();
-                }
+                self.input.history_next();
                 None
             }
+
             KeyCode::PageUp => {
                 self.scroll.scroll_page_up();
                 None
@@ -145,30 +232,37 @@ impl App {
                 self.scroll.scroll_to_bottom();
                 None
             }
+
+            // Backspace (without Alt — Alt+Backspace handled above)
             KeyCode::Backspace => {
                 self.input.backspace();
                 None
             }
+
+            // Left/Right: cursor (or scroll with Shift)
+            KeyCode::Left if shift => {
+                self.scroll.scroll_left();
+                None
+            }
             KeyCode::Left => {
-                if key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
-                    self.scroll.scroll_left();
-                } else {
-                    self.input.cursor_left();
-                }
+                self.input.cursor_left();
+                None
+            }
+            KeyCode::Right if shift => {
+                self.scroll.scroll_right();
                 None
             }
             KeyCode::Right => {
-                if key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
-                    self.scroll.scroll_right();
-                } else {
-                    self.input.cursor_right();
-                }
+                self.input.cursor_right();
                 None
             }
-            KeyCode::Char(ch) => {
+
+            // Plain char insert (no Ctrl modifier)
+            KeyCode::Char(ch) if !ctrl => {
                 self.input.insert_char(ch);
                 None
             }
+
             _ => None,
         }
     }
