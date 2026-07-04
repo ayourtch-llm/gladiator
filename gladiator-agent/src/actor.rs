@@ -189,16 +189,32 @@ impl Actor for AgentActor {
                             {
                                 let mut s = state.lock().await;
                                 if !s.pending_tool_calls.is_empty() {
-                                    s.buffer_user_message(user_message);
+                                    s.buffer_user_message(user_message.clone());
+                                    drop(s);
+                                    // Notify TUI that this message is queued (pending)
+                                    let queued_msg = Message::new(
+                                        &self.stream_output_topic,
+                                        &self.id(),
+                                        user_message,
+                                    ).with_type("UserMessageQueued");
+                                    let _ = bus.publish(&self.id(), queued_msg).await;
                                     continue;
                                 }
                                 s.reset_iteration();
                                 if s.was_interrupted {
-                                    s.merge_user_message(user_message);
+                                    s.merge_user_message(user_message.clone());
                                     s.was_interrupted = false;
                                 } else {
-                                    s.add_user_message(user_message);
+                                    s.add_user_message(user_message.clone());
                                 }
+                                drop(s);
+                                // Notify TUI that this message is now displayed in the chat
+                                let displayed_msg = Message::new(
+                                    &self.stream_output_topic,
+                                    &self.id(),
+                                    user_message,
+                                ).with_type("UserMessageDisplayed");
+                                let _ = bus.publish(&self.id(), displayed_msg).await;
                             }
 
                             let messages = {
@@ -399,8 +415,15 @@ impl Actor for AgentActor {
                                     let pending = s.drain_pending_messages();
                                     if !pending.is_empty() {
                                         s.reset_iteration();
-                                        for m in pending {
-                                            s.add_user_message(m);
+                                        for m in &pending {
+                                            s.add_user_message(m.clone());
+                                            // Notify TUI that this pending message is now displayed
+                                            let displayed_msg = Message::new(
+                                                &self.stream_output_topic,
+                                                &self.id(),
+                                                m.clone(),
+                                            ).with_type("UserMessageDisplayed");
+                                            let _ = bus.publish(&self.id(), displayed_msg).await;
                                         }
                                     }
                                     if s.max_reached(self.max_iterations) {

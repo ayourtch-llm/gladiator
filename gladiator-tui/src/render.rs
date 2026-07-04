@@ -86,6 +86,7 @@ impl Renderer {
         input: &InputState,
         scroll: &ScrollState,
         status_text: &str,
+        pending_messages: &[String],
     ) {
         let area = frame.area();
         let term_width = area.width as usize;
@@ -99,11 +100,19 @@ impl Renderer {
         let max_input_height = (area.height / 2).max(3);
         let input_height = input_height.min(max_input_height);
 
+        // Pending messages panel: each message is one line, +1 for border.
+        let pending_height = if pending_messages.is_empty() {
+            0
+        } else {
+            (pending_messages.len() as u16 + 1).min((area.height / 4).max(3))
+        };
+
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3),
                 Constraint::Min(1),
+                Constraint::Length(pending_height),
                 Constraint::Length(input_height),
                 Constraint::Length(1),
             ])
@@ -111,8 +120,9 @@ impl Renderer {
 
         self.render_header(frame, chunks[0]);
         self.render_messages(frame, chunks[1], chat, scroll);
-        self.render_input(frame, chunks[2], input);
-        self.render_status_bar(frame, chunks[3], status_text, scroll);
+        self.render_pending(frame, chunks[2], pending_messages);
+        self.render_input(frame, chunks[3], input);
+        self.render_status_bar(frame, chunks[4], status_text, scroll);
     }
 
     fn render_header(&self, frame: &mut Frame, area: Rect) {
@@ -130,6 +140,46 @@ impl Renderer {
             )
             .block(block);
 
+        frame.render_widget(para, area);
+    }
+
+    fn render_pending(&self, frame: &mut Frame, area: Rect, pending_messages: &[String]) {
+        if pending_messages.is_empty() || area.height == 0 {
+            return;
+        }
+
+        let block = Block::default()
+            .borders(Borders::TOP)
+            .border_style(Style::default().fg(self.theme.color_warning()))
+            .style(Style::default().bg(self.theme.color_background()));
+
+        let mut lines: Vec<Line> = Vec::new();
+        let header = Line::from(vec![
+            Span::styled(
+                " pending messages ",
+                Style::default()
+                    .fg(self.theme.color_warning())
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]);
+        lines.push(header);
+
+        let available = area.height as usize;
+        let max_msgs = available.saturating_sub(1);
+        for msg in pending_messages.iter().take(max_msgs) {
+            let mut spans: Vec<Span> = Vec::new();
+            spans.push(Span::styled(
+                "  + ",
+                Style::default().fg(self.theme.color_warning()),
+            ));
+            spans.push(Span::styled(
+                msg.as_str(),
+                Style::default().fg(self.theme.color_text()),
+            ));
+            lines.push(Line::from(spans));
+        }
+
+        let para = Paragraph::new(lines).block(block);
         frame.render_widget(para, area);
     }
 

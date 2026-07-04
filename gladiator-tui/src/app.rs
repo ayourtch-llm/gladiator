@@ -31,6 +31,7 @@ pub struct App {
     last_stream_type: Option<String>,
     last_tool_call_index: Option<usize>,
     terminal_width: usize,
+    pending_messages: Vec<String>,
 }
 
 impl App {
@@ -45,6 +46,7 @@ impl App {
             last_stream_type: None,
             last_tool_call_index: None,
             terminal_width: 80,
+            pending_messages: Vec::new(),
         }
     }
 
@@ -95,6 +97,29 @@ impl App {
         self.terminal_width
     }
 
+    pub fn pending_messages(&self) -> &[String] {
+        &self.pending_messages
+    }
+
+    pub fn add_pending_message(&mut self, msg: String) {
+        self.pending_messages.push(msg);
+    }
+
+    /// Called when the agent has processed a user message (either immediately
+    /// or after draining from pending). Removes the message from the pending
+    /// list (if present) and adds it to the chat as a user message.
+    pub fn display_pending_message(&mut self, msg: &str) {
+        if let Some(pos) = self.pending_messages.iter().position(|m| m == msg) {
+            self.pending_messages.remove(pos);
+        }
+        self.chat.add_message(AppMessage::user(msg));
+        self.scroll.scroll_to_bottom();
+    }
+
+    pub fn clear_pending_messages(&mut self) {
+        self.pending_messages.clear();
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<String> {
         let ctrl = key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(crossterm::event::KeyModifiers::ALT);
@@ -119,8 +144,9 @@ impl App {
             KeyCode::Enter => {
                 let text = self.input.submit();
                 if !text.is_empty() {
-                    self.chat.add_message(AppMessage::user(&text));
-                    self.scroll.scroll_to_bottom();
+                    // Don't add to chat locally — the agent will publish
+                    // UserMessageDisplayed or UserMessageQueued events
+                    // that drive the display.
                     Some(text)
                 } else {
                     None
@@ -300,9 +326,44 @@ impl App {
             return;
         }
 
+        // Handle user message queued (pending while agent is busy with tool calls)
+        if msg_type == "UserMessageQueued" {
+            let text = msg.payload_str().unwrap_or_default();
+            if !text.is_empty() {
+                self.add_pending_message(text);
+            }
+            return;
+        }
+
+        // Handle user message displayed (agent processed the message, show in chat)
+        if msg_type == "UserMessageDisplayed" {
+            let text = msg.payload_str().unwrap_or_default();
+            if !text.is_empty() {
+                self.display_pending_message(&text);
+            }
+            return;
+        }
+
+        // Handle pending user message tracking
+        if msg_type == "UserMessageQueued" {
+            let text = msg.payload_str().unwrap_or_default();
+            if !text.is_empty() {
+                self.add_pending_message(text);
+            }
+            return;
+        }
+        if msg_type == "UserMessageDisplayed" {
+            let text = msg.payload_str().unwrap_or_default();
+            if !text.is_empty() {
+                self.display_pending_message(&text);
+            }
+            return;
+        }
+
         // Handle state replay (from /load): rebuild chat from saved conversation
         if msg_type == "StateReplay" {
             self.chat.clear();
+            self.pending_messages.clear();
             self.last_stream_type = None;
             self.last_tool_call_index = None;
             if let Some(messages) = msg.payload.get("messages").and_then(|m| m.as_array()) {
@@ -512,6 +573,7 @@ impl App {
                     &self.input,
                     &self.scroll,
                     &self.status,
+                    &self.pending_messages,
                 );
             })
             .ok();
