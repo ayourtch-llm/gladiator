@@ -29,6 +29,13 @@ pub struct ConversationState {
     /// Transient: not serialized.
     #[serde(skip)]
     pub tool_call_order: Vec<String>,
+    /// True while an LLM inference request is in flight (between sending the
+    /// conversation and receiving either a final output or tool calls).
+    /// When set, user messages arriving on the input topic are buffered into
+    /// `pending_messages` instead of starting a new turn — matching the
+    /// behaviour already used for pending tool calls.
+    #[serde(skip)]
+    pub inference_in_flight: bool,
     /// Last reported token usage from the LLM (`StreamStats.usage`),
     /// published at end-of-stream by the LLM actor. Transient: not
     /// serialized — refreshed each turn from the live bus.
@@ -357,5 +364,6 @@ impl ConversationState {
         self.current_reasoning.clear();
         self.current_partial_response.clear();
         self.tool_call_order.clear();
+        self.inference_in_flight = false;
     }
 }

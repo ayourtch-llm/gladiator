@@ -160,6 +160,9 @@ impl AgentActor {
             .with_type("Warning");
             let _ = bus.publish(&self.id(), warn_msg).await;
         } else {
+            // Mark inference as in-flight before sending so user messages
+            // arriving during the LLM stream are buffered.
+            s.inference_in_flight = true;
             let messages = s.build_messages_with_system(&self.system_message);
             drop(s);
             if let Err(e) = self.send_conversation(bus, &messages).await {
@@ -441,7 +444,7 @@ impl Actor for AgentActor {
 
                             {
                                 let mut s = state.lock().await;
-                                if !s.pending_tool_calls.is_empty() {
+                                if !s.pending_tool_calls.is_empty() || s.inference_in_flight {
                                     s.buffer_user_message(user_message.clone());
                                     drop(s);
                                     // Notify TUI that this message is queued (pending)
@@ -460,6 +463,9 @@ impl Actor for AgentActor {
                                 } else {
                                     s.add_user_message(user_message.clone());
                                 }
+                                // Mark inference as in-flight so user messages
+                                // arriving while the LLM is streaming are buffered.
+                                s.inference_in_flight = true;
                                 drop(s);
                                 // Notify TUI that this message is now displayed in the chat
                                 let displayed_msg = Message::new(
@@ -500,6 +506,7 @@ impl Actor for AgentActor {
                             if output.starts_with("Interrupted:") {
                                 let mut s = state.lock().await;
                                 s.was_interrupted = true;
+                                s.inference_in_flight = false;
                                 s.clear_reasoning();
                                 // Preserve partial assistant text that was streamed before the interrupt
                                 if let Some(partial) = s.drain_partial_response() {
@@ -516,6 +523,9 @@ impl Actor for AgentActor {
                             } else {
                                 {
                                     let mut s = state.lock().await;
+                                    // Inference is complete — clear the in-flight flag
+                                    // so user messages are no longer buffered.
+                                    s.inference_in_flight = false;
                                     s.add_assistant_message(output);
                                     s.increment_iteration();
                                 }
@@ -565,6 +575,10 @@ impl Actor for AgentActor {
 
                             {
                                 let mut s = state.lock().await;
+                                // The LLM responded with tool calls — inference is
+                                // no longer in flight, but pending_tool_calls now
+                                // gates further buffering.
+                                s.inference_in_flight = false;
                                 s.add_tool_calls(tool_calls.clone());
                                 s.increment_iteration();
                             }
