@@ -705,6 +705,7 @@ dependencies = [
  "glob",
  "ignore",
  "regex",
+ "reqwest",
  "rmcp",
  "serde",
  "serde_json",

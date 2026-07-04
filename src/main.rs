@@ -6,7 +6,7 @@ use gladiator_server::run_server;
 use gladiator_tools::builtin::{BashTool, EditFileTool, GlobTool, GrepTool, ReadFileTool, WriteFileTool};
 use gladiator_tools::conclusions::{GetConclusionsTool, RecordConclusionTool};
 use gladiator_tools::fixme::{CreateFixmeTool, GetAllFixmesTool, GetOpenFixmesTool, MarkFixmeDoneTool};
-use gladiator_tools::{ToolActorRunner, ToolRegistry};
+use gladiator_tools::{ToolActorRunner, ToolRegistry, WebFetchTool};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -248,6 +248,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if config.tools.conclusions {
         registry.add(Box::new(RecordConclusionTool::with_working_dir(&working_dir)));
         registry.add(Box::new(GetConclusionsTool::with_working_dir(&working_dir)));
+    }
+    if config.tools.web_fetch {
+        registry.add(Box::new(WebFetchTool));
     }
     tracing::info!("Built-in tools registered: {} tools", registry.len());
 

@@ -344,6 +344,9 @@ pub struct ToolsConfig {
     pub fixme: bool,
     #[serde(default = "default_tool_on")]
     pub conclusions: bool,
+    /// Enable the web_fetch built-in tool (HTTP fetch + HTML-to-text).
+    #[serde(default = "default_tool_off")]
+    pub web_fetch: bool,
     #[serde(default)]
     pub sandbox: SandboxConfig,
 }
@@ -359,6 +362,7 @@ impl Default for ToolsConfig {
             grep: true,
             fixme: true,
             conclusions: true,
+            web_fetch: false,
             sandbox: SandboxConfig::default(),
         }
     }
@@ -383,6 +387,10 @@ impl Default for SandboxConfig {
 
 fn default_tool_on() -> bool {
     true
+}
+
+fn default_tool_off() -> bool {
+    false
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
