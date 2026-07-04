@@ -101,6 +101,9 @@ impl ConversationState {
 
     pub fn add_assistant_message(&mut self, content: impl Into<String>) {
         let reasoning = self.drain_reasoning();
+        // The committed text supersedes any streamed partial; clear it so it
+        // can't leak into a later tool-call turn's content.
+        self.clear_partial_response();
         let mut msg = serde_json::json!({
             "role": "assistant",
             "content": content.into()
@@ -113,6 +116,11 @@ impl ConversationState {
 
     pub fn add_tool_calls(&mut self, tool_calls: Vec<serde_json::Value>) {
         let reasoning = self.drain_reasoning();
+        // Preserve any natural-language content the model emitted alongside the
+        // tool calls (streamed as LlmStream chunks). Without this the assistant
+        // turn is pure tool_calls with no words, so the model has no durable
+        // record of its own decisions and re-derives them on later turns.
+        let content = self.drain_partial_response();
         // Record the order of tool call IDs for reordering results later.
         // Synthesize ids for empty/missing ones so they don't collapse in the HashSet.
         self.tool_call_order.clear();
@@ -129,6 +137,11 @@ impl ConversationState {
             "role": "assistant",
             "tool_calls": tool_calls
         });
+        if let Some(c) = content {
+            if !c.is_empty() {
+                msg["content"] = serde_json::Value::String(c);
+            }
+        }
         if let Some(r) = reasoning {
             msg["reasoning"] = serde_json::Value::String(r);
         }

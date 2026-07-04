@@ -293,6 +293,56 @@ fn reasoning_attached_to_tool_calls() {
 }
 
 #[test]
+fn content_attached_to_tool_calls() {
+    // Natural-language content streamed alongside tool calls must be preserved
+    // on the assistant message so the model retains a record of its decisions.
+    let mut state = ConversationState::new();
+    state.append_partial_response("Let me check the build output.");
+    let tool_calls = vec![serde_json::json!({
+        "id": "call-1",
+        "type": "function",
+        "function": {"name": "bash", "arguments": "{}"}
+    })];
+    state.add_tool_calls(tool_calls);
+    assert_eq!(state.messages.len(), 1);
+    assert_eq!(state.messages[0]["content"], "Let me check the build output.");
+    assert!(state.messages[0]["tool_calls"].is_array());
+    assert!(state.current_partial_response.is_empty());
+    // Content flows back to the LLM (only reasoning is stripped).
+    let sent = state.build_messages_with_system("");
+    assert_eq!(sent[0]["content"], "Let me check the build output.");
+}
+
+#[test]
+fn no_content_field_on_tool_calls_when_no_partial() {
+    let mut state = ConversationState::new();
+    let tool_calls = vec![serde_json::json!({
+        "id": "call-1",
+        "type": "function",
+        "function": {"name": "bash", "arguments": "{}"}
+    })];
+    state.add_tool_calls(tool_calls);
+    assert!(state.messages[0].get("content").is_none());
+}
+
+#[test]
+fn partial_response_does_not_leak_from_text_turn_to_tool_calls() {
+    // A completed text turn must not carry its streamed content into a later
+    // tool-call turn.
+    let mut state = ConversationState::new();
+    state.append_partial_response("Final answer text.");
+    state.add_assistant_message("Final answer text.");
+    assert!(state.current_partial_response.is_empty());
+    let tool_calls = vec![serde_json::json!({
+        "id": "call-1",
+        "type": "function",
+        "function": {"name": "bash", "arguments": "{}"}
+    })];
+    state.add_tool_calls(tool_calls);
+    assert!(state.messages[1].get("content").is_none());
+}
+
+#[test]
 fn reasoning_cleared_on_user_message() {
     let mut state = ConversationState::new();
     state.append_reasoning("Transient thinking");
