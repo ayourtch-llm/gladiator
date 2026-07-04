@@ -1,9 +1,28 @@
+use crate::internal_tools::InternalToolOutcome;
 use crate::state::ConversationState;
 use gladiator_core::{Actor, ActorAnnouncement, AgentConfig, Bus, Message};
 use gladiator_llm::LlmRequest;
 use std::sync::Arc;
 use tokio::sync::broadcast::error::RecvError;
 use tracing::{debug, error, info, warn};
+
+/// Resolve a path against the agent working directory. Absolute paths and
+/// `~`-prefixed paths are used as-is; relative paths are joined onto the
+/// working dir (with `.` interpreted as the process cwd). Mirrors the
+/// `resolve_path` helper used by the built-in file tools.
+fn resolve_against_working_dir(path: &str, working_dir: &str) -> String {
+    if path.starts_with('/') || path.starts_with('~') {
+        return path.to_string();
+    }
+    let wd = if working_dir == "." {
+        std::env::current_dir()
+            .map(|d| d.to_string_lossy().to_string())
+            .unwrap_or_else(|_| ".".to_string())
+    } else {
+        working_dir.to_string()
+    };
+    format!("{}/{}", wd, path)
+}
 
 #[derive(Debug, Default)]
 pub struct AgentActor {
@@ -127,31 +146,33 @@ impl AgentActor {
         }
     }
 
-    /// Handle an agent-internal tool call (e.g. todo_write/todo_read) directly
-    /// against in-memory state. Returns the tool-result text and success flag.
-    /// These never reach a `ToolActorRunner`, so no execute message is
-    /// published on the bus.
+    /// Handle an agent-internal tool call (e.g. todo_write/todo_read/
+    /// restart_from_file) directly against in-memory state. These never reach a
+    /// `ToolActorRunner`, so no execute message is published on the bus.
+    ///
+    /// The returned `InternalToolOutcome::context_reset` flag signals that the
+    /// handler rebuilt the conversation from scratch (only `restart_from_file`
+    /// does this): the dispatch loop must then skip appending a tool result,
+    /// since the assistant tool_calls message it would answer has been wiped.
     async fn handle_internal_tool(
         &self,
         name: &str,
         args: &serde_json::Value,
         state: &Arc<tokio::sync::Mutex<ConversationState>>,
-    ) -> (String, bool) {
+    ) -> crate::internal_tools::InternalToolOutcome {
+        use crate::internal_tools as it;
         match name {
             "todo_write" => {
                 let raw_todos = match args.get("todos").and_then(|t| t.as_array()) {
                     Some(arr) => arr,
-                    None => return ("Missing 'todos' array".to_string(), false),
+                    None => return InternalToolOutcome::err("Missing 'todos' array"),
                 };
                 let mut entries = Vec::with_capacity(raw_todos.len());
                 for (i, raw) in raw_todos.iter().enumerate() {
-                    match crate::todo::TodoEntry::from_json(raw) {
+                    match it::TodoEntry::from_json(raw) {
                         Ok(e) => entries.push(e),
                         Err(e) => {
-                            return (
-                                format!("todos[{}]: {}", i, e),
-                                false,
-                            )
+                            return InternalToolOutcome::err(format!("todos[{}]: {}", i, e))
                         }
                     }
                 }
@@ -159,9 +180,9 @@ impl AgentActor {
                 // advertised in the tool description); coerce extras to pending.
                 let mut seen_in_progress = false;
                 for e in &mut entries {
-                    if e.status == crate::todo::TodoStatus::InProgress {
+                    if e.status == it::TodoStatus::InProgress {
                         if seen_in_progress {
-                            e.status = crate::todo::TodoStatus::Pending;
+                            e.status = it::TodoStatus::Pending;
                         } else {
                             seen_in_progress = true;
                         }
@@ -172,14 +193,102 @@ impl AgentActor {
                     s.set_todos(entries)
                 };
                 info!("Agent {} updated todos:\n{}", self.index, summary);
-                (summary, true)
+                InternalToolOutcome::ok(summary)
             }
             "todo_read" => {
                 let s = state.lock().await;
-                (s.todos_render(), true)
+                InternalToolOutcome::ok(s.todos_render())
             }
-            _ => (format!("Unknown internal tool: {}", name), false),
+            "restart_from_file" => self.handle_restart_from_file(args, state).await,
+            _ => InternalToolOutcome::err(format!("Unknown internal tool: {}", name)),
         }
+    }
+
+    /// Back up the live `ConversationState` to `/tmp/<pid>-<datetime>.json`,
+    /// wipe the context, and inject the file's contents (wrapped with a
+    /// continuation directive) as a fresh user instruction. Failure to back up
+    /// or read the file aborts the restart so no context is lost.
+    async fn handle_restart_from_file(
+        &self,
+        args: &serde_json::Value,
+        state: &Arc<tokio::sync::Mutex<ConversationState>>,
+    ) -> crate::internal_tools::InternalToolOutcome {
+        use crate::internal_tools as it;
+
+        let filename = match args.get("filename").and_then(|v| v.as_str()) {
+            Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+            _ => return InternalToolOutcome::err("Missing 'filename' parameter"),
+        };
+
+        let resolved = resolve_against_working_dir(&filename, &self.config.working_dir);
+
+        let content = match std::fs::read_to_string(&resolved) {
+            Ok(c) => c,
+            Err(e) => {
+                return InternalToolOutcome::err(format!(
+                    "Failed to read restart file '{}': {}",
+                    resolved, e
+                ))
+            }
+        };
+
+        let pid = std::process::id();
+        let epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let backup_name = it::backup_filename(pid, epoch);
+        let backup_path = format!("/tmp/{}", backup_name);
+
+        // Serialize the snapshot BEFORE taking the lock we clear under, so a
+        // serialization failure also aborts without mutating anything.
+        let snapshot = {
+            let s = state.lock().await;
+            match serde_json::to_string_pretty(&*s) {
+                Ok(json) => json,
+                Err(e) => {
+                    return InternalToolOutcome::err(format!(
+                        "Failed to serialize context backup: {}",
+                        e
+                    ))
+                }
+            }
+        };
+
+        if let Err(e) = std::fs::write(&backup_path, &snapshot) {
+            return InternalToolOutcome::err(format!(
+                "Failed to write context backup to '{}': {}",
+                backup_path, e
+            ));
+        }
+        warn!(
+            "Agent {}: restart_from_file backing up context to {}",
+            self.index, backup_path
+        );
+
+        let instruction = it::build_restart_instruction(&content);
+        {
+            let mut s = state.lock().await;
+            s.clear_for_restart();
+            s.add_user_message(instruction.clone());
+            // Fresh turn budget for the restarted conversation.
+            s.reset_iteration();
+        }
+        info!(
+            "Agent {}: context restarted from '{}', backup at '{}'",
+            self.index, resolved, backup_path
+        );
+
+        // context_reset = true: the dispatch loop must not append a tool
+        // result, since the assistant tool_calls message was just wiped.
+        InternalToolOutcome::ok(format!(
+            "Context backed up to {} and cleared. Restarted from '{}'.",
+            backup_path, resolved
+        ))
+        .with_reset(format!(
+            "Restarted from '{}'. Backup: {}. Continuing with injected instructions.",
+            resolved, backup_path
+        ))
     }
 
     async fn send_conversation(
@@ -445,10 +554,12 @@ impl Actor for AgentActor {
                                     }
                                 };
 
-                                // Agent-internal tools (todo_write/todo_read) are handled inline
-                                // against ConversationState — they never go to a ToolActorRunner,
-                                // so no execute message is published on the bus.
-                                if crate::todo::is_internal_tool(&func_name) {
+                                // Agent-internal tools (todo_write/todo_read/
+                                // restart_from_file) are handled inline against
+                                // ConversationState — they never go to a
+                                // ToolActorRunner, so no execute message is
+                                // published on the bus.
+                                if crate::internal_tools::is_internal_tool(&func_name) {
                                     info!("Agent {} handling internal tool: {}", self.index, func_name);
                                     let tool_status = Message::new(
                                         &self.stream_output_topic,
@@ -457,13 +568,30 @@ impl Actor for AgentActor {
                                     ).with_type("Info");
                                     let _ = bus.publish(&self.id(), tool_status).await;
 
-                                    let (result_text, success) =
+                                    let outcome =
                                         self.handle_internal_tool(&func_name, &args, &state).await;
-                                    let display_snapshot = result_text.clone();
+                                    let success = outcome.success;
+                                    let display_snapshot = outcome.result_text.clone();
+
                                     {
                                         let mut s = state.lock().await;
-                                        s.add_tool_result(&tool_call_id, &func_name, result_text, success);
-                                        s.resolve_tool_call(&tool_call_id);
+                                        if outcome.context_reset {
+                                            // restart_from_file rebuilt the whole transcript:
+                                            // appending a tool result here would answer a
+                                            // tool_calls message that no longer exists, so
+                                            // only resolve (no-op on the cleared pending set)
+                                            // and let advance_turn_if_resolved send the fresh
+                                            // conversation to the LLM.
+                                            s.resolve_tool_call(&tool_call_id);
+                                        } else {
+                                            s.add_tool_result(
+                                                &tool_call_id,
+                                                &func_name,
+                                                outcome.result_text,
+                                                success,
+                                            );
+                                            s.resolve_tool_call(&tool_call_id);
+                                        }
                                     }
                                     let stream_msg = Message::new(
                                         &self.stream_output_topic,

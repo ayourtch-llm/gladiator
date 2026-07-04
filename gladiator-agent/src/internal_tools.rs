@@ -1,11 +1,15 @@
-//! Transient agent-internal todo list.
+//! Agent-internal tools: handled inline against `ConversationState`, never
+//! dispatched to a `ToolActorRunner`. Currently two families live here:
 //!
-//! Unlike `fixme.json` (persisted to disk, shared across sessions), these todos
-//! live inside `ConversationState`: they are saved/restored only when the user
-//! explicitly dumps/loads agent state, and are otherwise in-memory and per
-//! agent. The agent handles `todo_write` / `todo_read` calls inline against its
-//! own state — they never reach a `ToolActorRunner` — so the bus carries no
-//! execute messages for them.
+//! - **todo_write / todo_read**: transient per-agent todo list (saved/restored
+//!   with the conversation state, not a separate disk file).
+//! - **restart_from_file**: snapshot current context to `/tmp`, wipe the
+//!   conversation, and inject fresh instructions read from a file — used to
+//!   shed a bloated/corrupted context and continue from a handoff note.
+//!
+//! All internal tools share the registry primitives below (`INTERNAL_TOOL_NAMES`,
+//! `is_internal_tool`, `internal_tool_defs`); the agent's dispatch loop checks
+//! `is_internal_tool` to short-circuit before publishing an execute message.
 
 use serde::{Deserialize, Serialize};
 
@@ -25,9 +29,6 @@ impl Default for TodoStatus {
 }
 
 impl TodoStatus {
-    /// Parse from an arbitrary string, falling back to `Pending` for anything
-    /// unknown. This keeps the tool resilient to slight model misspellings
-    /// (e.g. "in-progress", "done") instead of failing the whole call.
     pub fn from_str_loose(s: &str) -> Self {
         let normalized = s.trim().to_lowercase();
         match normalized.as_str() {
@@ -45,7 +46,6 @@ impl TodoStatus {
         }
     }
 
-    /// Single-char glyph for compact rendering.
     pub fn glyph(&self) -> &'static str {
         match self {
             TodoStatus::Pending => "[ ]",
@@ -66,8 +66,6 @@ pub struct TodoEntry {
 }
 
 impl TodoEntry {
-    /// Build a TodoEntry from a raw JSON value, tolerating missing/optional
-    /// fields. `content` is required; unknown status strings coerce to Pending.
     pub fn from_json(v: &serde_json::Value) -> Result<Self, String> {
         let content = v
             .get("content")
@@ -98,7 +96,8 @@ impl TodoEntry {
 
 /// Names of tool calls handled internally by the agent, never dispatched to a
 /// `ToolActorRunner`. Keep this set in sync with `internal_tool_defs`.
-pub const INTERNAL_TOOL_NAMES: &[&str] = &["todo_write", "todo_read"];
+pub const INTERNAL_TOOL_NAMES: &[&str] =
+    &["todo_write", "todo_read", "restart_from_file"];
 
 pub fn is_internal_tool(name: &str) -> bool {
     INTERNAL_TOOL_NAMES.contains(&name)
@@ -142,7 +141,68 @@ pub fn internal_tool_defs() -> Vec<serde_json::Value> {
                 "parameters": {"type": "object", "properties": {}}
             }
         }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "restart_from_file",
+                "description": "Reset the conversation context and continue from a fresh instruction file. Saves a backup of the current context to /tmp/<pid>-<datetime>.json, clears ALL conversation history and todos, then injects the file's contents as a new user instruction with a directive to continue executing. Call this ONLY when context is bloated or corrupted and you have written a handoff note to a file. Do NOT batch this with other tool calls — invoke it alone.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "filename": {
+                            "type": "string",
+                            "description": "Path to the handoff/instruction file. Relative paths resolve against the agent working directory; absolute paths used as-is."
+                        }
+                    },
+                    "required": ["filename"]
+                }
+            }
+        }),
     ]
+}
+
+/// Outcome of an internal tool invocation. `context_reset` signals that the
+/// handler rebuilt the conversation from scratch (currently only
+/// `restart_from_file`): in that case the dispatch loop must NOT append a tool
+/// result, because the assistant tool_calls message it would answer has been
+/// wiped along with the rest of the history.
+#[derive(Debug, Clone)]
+pub struct InternalToolOutcome {
+    pub result_text: String,
+    pub success: bool,
+    pub context_reset: bool,
+}
+
+impl InternalToolOutcome {
+    pub fn ok(text: impl Into<String>) -> Self {
+        Self {
+            result_text: text.into(),
+            success: true,
+            context_reset: false,
+        }
+    }
+
+    pub fn err(text: impl Into<String>) -> Self {
+        Self {
+            result_text: text.into(),
+            success: false,
+            context_reset: false,
+        }
+    }
+
+    pub fn with_reset(mut self, text: impl Into<String>) -> Self {
+        self.result_text = text.into();
+        self.context_reset = true;
+        self
+    }
+}
+
+/// Build the `/tmp/<pid>-<datetime>.json` backup filename for a context dump.
+/// `datetime` is UTC `YYYYmmdd-HHMMSS` so filenames sort chronologically and
+/// stay readable without a decoder. Pure function over epoch seconds so it can
+/// be unit-tested without touching the clock.
+pub fn backup_filename(pid: u32, epoch_secs: u64) -> String {
+    format!("{}-{}.json", pid, format_utc_datetime(epoch_secs))
 }
 
 /// Render the todo list as a compact, human-readable block.
@@ -161,6 +221,47 @@ pub fn render_todos(todos: &[TodoEntry]) -> String {
         ));
     }
     out
+}
+
+/// Wrap the file contents read by `restart_from_file` into the injected user
+/// instruction. Exported so the agent layer can call it after performing the
+/// file read + state clear itself.
+pub fn build_restart_instruction(file_content: &str) -> String {
+    format!(
+        "[Context restarted from file — prior history was backed up to /tmp.]\n\
+         ---BEGIN HANDOFF---\n\
+         {}\n\
+         ---END HANDOFF---\n\
+         Continue executing the work described above. Re-establish any needed \
+         context from the handoff, check the todo list if relevant, and proceed.",
+        file_content
+    )
+}
+
+/// Format epoch seconds as UTC `YYYYmmdd-HHMMSS` using Howard Hinnant's
+/// days-from-civil algorithm — no chrono dependency required.
+fn format_utc_datetime(secs: u64) -> String {
+    let days = (secs / 86400) as i64;
+    let sod = secs % 86400; // seconds of day
+
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let year = if m <= 2 { y + 1 } else { y };
+
+    let hh = sod / 3600;
+    let mm = (sod % 3600) / 60;
+    let ss = sod % 60;
+    format!(
+        "{:04}{:02}{:02}-{:02}{:02}{:02}",
+        year, m, d, hh, mm, ss
+    )
 }
 
 #[cfg(test)]
@@ -236,14 +337,67 @@ mod tests {
             .iter()
             .map(|d| d["function"]["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, vec!["todo_write", "todo_read"]);
+        assert_eq!(names, vec!["todo_write", "todo_read", "restart_from_file"]);
     }
 
     #[test]
     fn is_internal_tool_matches_known_only() {
         assert!(is_internal_tool("todo_write"));
         assert!(is_internal_tool("todo_read"));
+        assert!(is_internal_tool("restart_from_file"));
         assert!(!is_internal_tool("bash"));
         assert!(!is_internal_tool("todo_list"));
+    }
+
+    #[test]
+    fn format_utc_datetime_epoch_is_1970() {
+        assert_eq!(format_utc_datetime(0), "19700101-000000");
+    }
+
+    #[test]
+    fn format_utc_datetime_known_instant() {
+        // 2025-01-01 00:00:00 UTC = 1735689600
+        assert_eq!(format_utc_datetime(1735689600), "20250101-000000");
+    }
+
+    #[test]
+    fn format_utc_datetime_midday() {
+        // 2024-02-29 12:34:56 UTC (leap day) = 1709210096
+        assert_eq!(format_utc_datetime(1709210096), "20240229-123456");
+    }
+
+    #[test]
+    fn backup_filename_shape() {
+        let name = backup_filename(12345, 1735689600);
+        assert_eq!(name, "12345-20250101-000000.json");
+        assert!(name.ends_with(".json"));
+    }
+
+    #[test]
+    fn restart_instruction_wraps_and_directs_continuation() {
+        let body = "## Goal\nShip feature X.";
+        let instr = build_restart_instruction(body);
+        assert!(instr.contains("[Context restarted from file"));
+        assert!(instr.contains("## Goal\nShip feature X."));
+        assert!(instr.contains("Continue executing"));
+        assert!(instr.contains("---BEGIN HANDOFF---"));
+        assert!(instr.contains("---END HANDOFF---"));
+    }
+
+    #[test]
+    fn outcome_constructors_set_flags() {
+        let ok = InternalToolOutcome::ok("done");
+        assert!(ok.success);
+        assert!(!ok.context_reset);
+        assert_eq!(ok.result_text, "done");
+
+        let err = InternalToolOutcome::err("boom");
+        assert!(!err.success);
+        assert!(!err.context_reset);
+
+        let reset = InternalToolOutcome::ok("ignored").with_reset("cleared");
+        assert!(reset.success);
+        assert!(reset.context_reset);
+        assert_eq!(reset.result_text, "cleared");
     }
 }

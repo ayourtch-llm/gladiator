@@ -1,4 +1,4 @@
-use crate::todo::{render_todos, TodoEntry};
+use crate::internal_tools::{render_todos, TodoEntry};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -269,5 +269,24 @@ impl ConversationState {
     /// Rendered snapshot of the current todo list (empty-safe).
     pub fn todos_render(&self) -> String {
         render_todos(&self.todos)
+    }
+
+    /// Wipe the entire conversation context: messages, todos, pending tool
+    /// calls, pending user messages, iteration counter, and interrupt flag.
+    /// Used by the `restart_from_file` internal tool after a backup snapshot
+    /// has been written to disk, so the next injected user message starts a
+    /// clean transcript. Transient accumulator fields (reasoning / partial
+    /// response / tool_call_order) are cleared too so nothing leaks across the
+    /// restart boundary.
+    pub fn clear_for_restart(&mut self) {
+        self.messages.clear();
+        self.todos.clear();
+        self.pending_tool_calls.clear();
+        self.pending_messages.clear();
+        self.iteration_count = 0;
+        self.was_interrupted = false;
+        self.current_reasoning.clear();
+        self.current_partial_response.clear();
+        self.tool_call_order.clear();
     }
 }

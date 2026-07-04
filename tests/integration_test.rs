@@ -399,7 +399,7 @@ async fn test_agent_internal_todo_write_advances_turn() {
     let mut exec_rx = bus.subscribe("spy-exec", exec_topic).await.unwrap();
 
     // Agent with the internal todo tool defs appended.
-    let mut tool_defs = gladiator_agent::todo::internal_tool_defs();
+    let mut tool_defs = gladiator_agent::internal_tools::internal_tool_defs();
     tool_defs.push(serde_json::json!({
         "type": "function",
         "function": {
@@ -522,4 +522,179 @@ fn test_conversation_state_loads_without_todos_key() {
     });
     let state: ConversationState = serde_json::from_value(legacy).unwrap();
     assert!(state.todos.is_empty(), "missing todos key must default to empty");
+}
+
+/// restart_from_file: backs up the live context to /tmp, wipes the transcript,
+/// and injects the file's contents as a fresh "continue executing" instruction.
+/// The follow-up LLM request must contain ONLY the injected user message (no
+/// prior history, no orphan tool result for the restart call itself), and a
+/// backup file containing the old conversation must appear under /tmp.
+#[tokio::test]
+async fn test_agent_restart_from_file_clears_and_reinjects() {
+    use std::collections::HashSet;
+
+    let bus = Bus::new();
+
+    let llm_in = "llm:in";
+    let llm_out = "llm:out";
+    let llm_stream = "llm:stream";
+    let llm_tool_calls = "llm:tool_calls";
+    let tool_results = "tool:results";
+    let agent_in = "agent:in";
+    let agent_stream = "agent:stream";
+
+    for topic in &[
+        llm_in, llm_out, llm_stream, llm_tool_calls, tool_results, agent_in, agent_stream,
+    ] {
+        bus.create_topic(topic, 100).await;
+    }
+
+    // Mock LLM
+    bus.register_announcement(gladiator_core::ActorAnnouncement {
+        id: "mock-llm".to_string(),
+        subscriptions: vec![llm_in.to_string()],
+        publications: vec![llm_out.to_string(), llm_stream.to_string(), llm_tool_calls.to_string()],
+    })
+    .await;
+    let mut llm_rx = bus.subscribe("mock-llm", llm_in).await.unwrap();
+
+    // Spy on the execute topic to prove restart is handled inline.
+    let exec_topic = "tool:restart_from_file:execute";
+    bus.create_topic(exec_topic, 100).await;
+    bus.register_announcement(gladiator_core::ActorAnnouncement {
+        id: "spy-exec".to_string(),
+        subscriptions: vec![],
+        publications: vec![exec_topic.to_string()],
+    })
+    .await;
+    let mut exec_rx = bus.subscribe("spy-exec", exec_topic).await.unwrap();
+
+    let tool_defs = gladiator_agent::internal_tools::internal_tool_defs();
+    let agent = AgentActor::new(
+        0, agent_in.to_string(),
+        llm_in.to_string(),   llm_out.to_string(),
+        llm_stream.to_string(), llm_tool_calls.to_string(),
+        tool_results.to_string(), agent_stream.to_string(),
+        AgentConfig::default(),
+    )
+    .with_tool_defs(tool_defs);
+    let agent_handle = bus.spawn_actor(agent).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Write the handoff file the restart tool will read.
+    let handoff_path = format!(
+        "/tmp/gladiator-restart-test-{}.md",
+        std::process::id()
+    );
+    let handoff_body = "## Handoff\nThe widget parser is half-done. Finish parse_widget().";
+    std::fs::write(&handoff_path, handoff_body).unwrap();
+
+    // Snapshot existing /tmp/*.json so we can identify the new backup.
+    let before: HashSet<String> = std::fs::read_dir("/tmp")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path().to_string_lossy().to_string())
+        .collect();
+
+    bus.register_announcement(gladiator_core::ActorAnnouncement {
+        id: "test-user".to_string(),
+        subscriptions: vec![],
+        publications: vec![agent_in.to_string()],
+    })
+    .await;
+    let _ = bus
+        .publish(
+            "test-user",
+            Message::new(agent_in, "test-user", "prime the history").with_type("UserInput"),
+        )
+        .await;
+
+    // Initial request reaches llm_in.
+    let _ = timeout(Duration::from_secs(5), llm_rx.recv())
+        .await
+        .expect("initial LLM request");
+
+    // Mock replies with a restart_from_file tool call.
+    let restart_call = serde_json::json!([{
+        "id": "call_restart_1", "type": "function",
+        "function": {
+            "name": "restart_from_file",
+            "arguments": format!("{{\"filename\":\"{}\"}}", handoff_path)
+        }
+    }]);
+    bus.publish(
+        "mock-llm",
+        Message::new(llm_tool_calls, "mock-llm", restart_call).with_type("LlmToolCalls"),
+    )
+    .await
+    .unwrap();
+
+    // The agent must send a follow-up LLM request containing the injected
+    // restart instruction and ONLY that (history wiped).
+    let follow_up = timeout(Duration::from_secs(5), llm_rx.recv())
+        .await
+        .expect("timed out waiting for follow-up after restart_from_file")
+        .unwrap();
+    let parsed: LlmRequest =
+        serde_json::from_value(follow_up.payload).expect("parse follow-up LlmRequest");
+    let messages = parsed.messages.expect("messages in follow-up");
+
+    // History must be wiped: only the default system message and the injected
+    // restart instruction remain — no prior user message, no orphan tool result.
+    assert_eq!(
+        messages.len(),
+        2,
+        "expected [system, user] after restart, got {}: {:?}",
+        messages.len(),
+        messages,
+    );
+    assert_eq!(messages[0]["role"], "system");
+    assert_eq!(messages[1]["role"], "user");
+    let content = messages[1]["content"].as_str().unwrap_or("");
+    assert!(content.contains("parse_widget"), "injected text missing handoff body: {}", content);
+    assert!(content.contains("Continue executing"), "missing continuation directive: {}", content);
+
+    // No tool result for the restart call must leak into history, and the old
+    // "prime the history" user message must be gone.
+    assert!(
+        !messages.iter().any(|m| m["role"] == "tool"),
+        "restart_from_file must not leave a tool-result message in history: {:?}",
+        messages,
+    );
+    assert!(
+        !messages.iter().any(|m| {
+            m["content"].as_str().map(|c| c.contains("prime the history")).unwrap_or(false)
+        }),
+        "old user message survived restart: {:?}",
+        messages,
+    );
+
+    // No execute message dispatched on the bus.
+    let leaked = timeout(Duration::from_millis(150), exec_rx.recv()).await;
+    assert!(leaked.is_err(), "restart_from_file must not dispatch an executor");
+
+    // A new /tmp/*-*.json backup must have appeared, containing the OLD
+    // conversation (the "prime the history" user message).
+    let after: Vec<String> = std::fs::read_dir("/tmp")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path().to_string_lossy().to_string())
+        .collect();
+    let new_files: Vec<&String> = after.iter().filter(|p| !before.contains(*p)).collect();
+    let backup_with_old_msg = new_files.iter().any(|p| {
+        std::fs::read_to_string(p)
+            .map(|body| body.contains("prime the history"))
+            .unwrap_or(false)
+    });
+    assert!(
+        backup_with_old_msg,
+        "expected a new /tmp backup containing the old conversation; new files: {:?}",
+        new_files
+    );
+
+    // Cleanup.
+    let _ = std::fs::remove_file(&handoff_path);
+    agent_handle.stop().await;
 }
