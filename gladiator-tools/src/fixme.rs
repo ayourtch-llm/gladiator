@@ -191,6 +191,57 @@ impl Tool for GetOpenFixmesTool {
     }
 }
 
+// --- CreateFixmeTool ---
+
+pub struct CreateFixmeTool {
+    store: FixmeStore,
+}
+
+impl CreateFixmeTool {
+    pub fn with_working_dir(working_dir: &str) -> Self {
+        Self {
+            store: FixmeStore::new(working_dir),
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for CreateFixmeTool {
+    fn name(&self) -> &str {
+        "create_fixme"
+    }
+
+    fn description(&self) -> &str {
+        "Create a new fixme note in fixme.json. Returns the created entry with its generated ID."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "phrase": {
+                    "type": "string",
+                    "description": "The fixme note text to add."
+                }
+            },
+            "required": ["phrase"]
+        })
+    }
+
+    async fn execute(&self, args: &serde_json::Value) -> Result<String, String> {
+        let phrase = args
+            .get("phrase")
+            .and_then(|v| v.as_str())
+            .ok_or("Missing 'phrase' parameter")?;
+        if phrase.trim().is_empty() {
+            return Err("phrase must not be empty".to_string());
+        }
+        let entry = self.store.add(phrase)?;
+        Ok(serde_json::to_string_pretty(&entry)
+            .unwrap_or_else(|e| format!("Failed to format: {}", e)))
+    }
+}
+
 // --- MarkFixmeDoneTool ---
 
 pub struct MarkFixmeDoneTool {

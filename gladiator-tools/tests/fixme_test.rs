@@ -1,5 +1,5 @@
 use gladiator_tools::fixme::{
-    FixmeEntry, FixmeStore, GetAllFixmesTool, GetOpenFixmesTool, MarkFixmeDoneTool,
+    CreateFixmeTool, FixmeEntry, FixmeStore, GetAllFixmesTool, GetOpenFixmesTool, MarkFixmeDoneTool,
 };
 use gladiator_tools::Tool;
 use serde_json::json;
@@ -267,4 +267,46 @@ async fn test_fixme_tool_names() {
     assert_eq!(all_tool.name(), "get_all_fixmes");
     assert_eq!(open_tool.name(), "get_open_fixmes");
     assert_eq!(mark_tool.name(), "mark_fixme_done");
+}
+
+#[tokio::test]
+async fn test_create_fixme_tool() {
+    let tmp = TempDir::new().unwrap();
+    let tool = CreateFixmeTool::with_working_dir(tmp.path().to_str().unwrap());
+    let args = json!({"phrase": "fix the bug"});
+    let result = tool.execute(&args).await.unwrap();
+    assert!(result.contains("fix the bug"));
+    assert!(result.contains("\"done\": false"));
+
+    // Verify it was saved
+    let store = FixmeStore::new(tmp.path().to_str().unwrap());
+    let all = store.get_all().unwrap();
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].phrase, "fix the bug");
+    assert!(!all[0].done);
+}
+
+#[tokio::test]
+async fn test_create_fixme_tool_missing_phrase() {
+    let tmp = TempDir::new().unwrap();
+    let tool = CreateFixmeTool::with_working_dir(tmp.path().to_str().unwrap());
+    let args = json!({});
+    let err = tool.execute(&args).await.unwrap_err();
+    assert!(err.contains("Missing 'phrase'"));
+}
+
+#[tokio::test]
+async fn test_create_fixme_tool_empty_phrase() {
+    let tmp = TempDir::new().unwrap();
+    let tool = CreateFixmeTool::with_working_dir(tmp.path().to_str().unwrap());
+    let args = json!({"phrase": "   "});
+    let err = tool.execute(&args).await.unwrap_err();
+    assert!(err.contains("empty"));
+}
+
+#[tokio::test]
+async fn test_create_fixme_tool_name() {
+    let tmp = TempDir::new().unwrap();
+    let create_tool = CreateFixmeTool::with_working_dir(tmp.path().to_str().unwrap());
+    assert_eq!(create_tool.name(), "create_fixme");
 }

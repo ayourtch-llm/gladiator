@@ -8,7 +8,7 @@ pub mod tool;
 
 pub use builtin::{BashTool, EditFileTool, GlobTool, GrepTool, ReadFileTool, WriteFileTool};
 pub use conclusions::{ConclusionEntry, ConclusionStore, GetConclusionsTool, RecordConclusionTool};
-pub use fixme::{FixmeEntry, FixmeStore, GetAllFixmesTool, GetOpenFixmesTool, MarkFixmeDoneTool};
+pub use fixme::{CreateFixmeTool, FixmeEntry, FixmeStore, GetAllFixmesTool, GetOpenFixmesTool, MarkFixmeDoneTool};
 pub use mcp::{McpClientHandler, McpServerHandle, McpServerRunner, McpTool};
 pub use registry::ToolRegistry;
 pub use runner::ToolActorRunner;
