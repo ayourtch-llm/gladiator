@@ -393,6 +393,16 @@ impl Actor for AgentActor {
                             {
                                 let mut s = state.lock().await;
                                 if s.all_tool_calls_resolved() {
+                                    // Drain pending user messages first. If any arrived
+                                    // during tool execution, reset the iteration counter
+                                    // so the agent gets a fresh budget for the new turn.
+                                    let pending = s.drain_pending_messages();
+                                    if !pending.is_empty() {
+                                        s.reset_iteration();
+                                        for m in pending {
+                                            s.add_user_message(m);
+                                        }
+                                    }
                                     if s.max_reached(self.max_iterations) {
                                         drop(s);
                                         let warn_msg = Message::new(
@@ -402,10 +412,6 @@ impl Actor for AgentActor {
                                         ).with_type("Warning");
                                         let _ = bus.publish(&self.id(), warn_msg).await;
                                     } else {
-                                        let pending = s.drain_pending_messages();
-                                        for m in pending {
-                                            s.add_user_message(m);
-                                        }
                                         let messages = s.build_messages_with_system(&self.system_message);
                                         drop(s);
                                         if let Err(e) = self.send_conversation(bus, &messages).await {
