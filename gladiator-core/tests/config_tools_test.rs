@@ -9,6 +9,7 @@ fn config_tools_toggle_defaults_all_on() {
     assert!(config.tools.edit);
     assert!(config.tools.glob);
     assert!(config.tools.grep);
+    assert!(config.tools.fixme);
 }
 
 #[test]

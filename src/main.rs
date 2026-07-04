@@ -4,6 +4,7 @@ use gladiator_core::{Bus, Message};
 use gladiator_llm::LlmActor;
 use gladiator_server::run_server;
 use gladiator_tools::builtin::{BashTool, EditFileTool, GlobTool, GrepTool, ReadFileTool, WriteFileTool};
+use gladiator_tools::fixme::{GetAllFixmesTool, GetOpenFixmesTool, MarkFixmeDoneTool};
 use gladiator_tools::{ToolActorRunner, ToolRegistry};
 use std::path::PathBuf;
 use clap::Parser;
@@ -148,6 +149,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if config.tools.grep {
         registry.add(Box::new(GrepTool::with_working_dir(&working_dir)));
     }
+    if config.tools.fixme {
+        registry.add(Box::new(GetAllFixmesTool::with_working_dir(&working_dir)));
+        registry.add(Box::new(GetOpenFixmesTool::with_working_dir(&working_dir)));
+        registry.add(Box::new(MarkFixmeDoneTool::with_working_dir(&working_dir)));
+    }
     tracing::info!("Built-in tools registered: {} tools", registry.len());
 
     // Spawn MCP tool servers and add their tools to the registry
@@ -250,7 +256,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         });
 
         // Run TUI app
-        match gladiator_tui::app::run_app(bus.clone(), user_input_tx, &config.topics).await {
+        match gladiator_tui::app::run_app(bus.clone(), user_input_tx, &config.topics, &config.agent.working_dir).await {
             Ok(()) => {}
             Err(e) => tracing::error!("TUI error: {}", e),
         }

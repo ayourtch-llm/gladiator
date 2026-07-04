@@ -488,9 +488,11 @@ pub async fn run_app(
     bus: Bus,
     user_input_tx: mpsc::UnboundedSender<String>,
     topics: &TopicsConfig,
+    working_dir: &str,
 ) -> io::Result<()> {
     let theme = Theme::default_dark();
     let mut app = App::new(theme);
+    let fixme_store = gladiator_tools::FixmeStore::new(working_dir);
 
     // Subscribe to the correct bus topics.
     // agent:stream — agent forwards LLM stream output, tool results, and warnings here
@@ -612,6 +614,21 @@ pub async fn run_app(
                                             );
                                             let _ = bus.publish("gladiator-tui", msg).await;
                                             app.chat_mut().add_message(AppMessage::system(&format!("Loading from {}...", filename)));
+                                            app.scroll_mut().scroll_to_bottom();
+                                        }
+                                        TuiCommand::Fixme(phrase) => {
+                                            match fixme_store.add(&phrase) {
+                                                Ok(entry) => {
+                                                    app.chat_mut().add_message(AppMessage::system(
+                                                        &format!("Added fixme: {} (id: {})", entry.phrase, entry.id),
+                                                    ));
+                                                }
+                                                Err(e) => {
+                                                    app.chat_mut().add_message(AppMessage::error(
+                                                        &format!("Failed to add fixme: {}", e),
+                                                    ));
+                                                }
+                                            }
                                             app.scroll_mut().scroll_to_bottom();
                                         }
                                     }

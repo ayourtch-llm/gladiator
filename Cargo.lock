@@ -722,6 +722,7 @@ dependencies = [
  "async-trait",
  "crossterm",
  "gladiator-core",
+ "gladiator-tools",
  "ratatui",
  "serde",
  "serde_json",

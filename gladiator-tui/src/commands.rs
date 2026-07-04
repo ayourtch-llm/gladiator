@@ -5,6 +5,7 @@
 pub enum TuiCommand {
     Save(String),
     Load(String),
+    Fixme(String),
 }
 
 /// Parse a user input string for TUI commands.
@@ -21,6 +22,11 @@ pub fn parse_tui_command(text: &str) -> Option<TuiCommand> {
         let filename = rest.trim();
         if !filename.is_empty() {
             return Some(TuiCommand::Load(filename.to_string()));
+        }
+    } else if let Some(rest) = trimmed.strip_prefix("/fixme ") {
+        let phrase = rest.trim();
+        if !phrase.is_empty() {
+            return Some(TuiCommand::Fixme(phrase.to_string()));
         }
     }
     None
@@ -84,5 +90,27 @@ mod tests {
             parse_tui_command("/save state.json   "),
             Some(TuiCommand::Save("state.json".to_string()))
         );
+    }
+
+    #[test]
+    fn parse_fixme_command() {
+        assert_eq!(
+            parse_tui_command("/fixme fix the bug in auth"),
+            Some(TuiCommand::Fixme("fix the bug in auth".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_fixme_with_trailing_whitespace() {
+        assert_eq!(
+            parse_tui_command("/fixme fix the bug   "),
+            Some(TuiCommand::Fixme("fix the bug".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_fixme_no_phrase() {
+        assert_eq!(parse_tui_command("/fixme"), None);
+        assert_eq!(parse_tui_command("/fixme "), None);
     }
 }
