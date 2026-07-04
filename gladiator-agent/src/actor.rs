@@ -316,6 +316,13 @@ impl Actor for AgentActor {
                                 s.increment_iteration();
                             }
 
+                            // Track whether at least one tool call in this batch was actually
+                            // dispatched for execution. If every call fails argument parsing inline,
+                            // nothing will arrive on `tool_results_rx` to advance the turn, so we must
+                            // trigger a follow-up LLM request ourselves (mirroring the post-resolution
+                            // logic below in the tool_results_rx arm).
+                            let mut dispatch_count: u32 = 0;
+
                             for (i, tc) in tool_calls.iter().enumerate() {
                                 debug!("[agent] tool_call[{}]: {:?}", i, tc);
                                 let tool_call_id = {
@@ -337,6 +344,10 @@ impl Actor for AgentActor {
                                     Ok(a) => a,
                                     Err(e) => {
                                         error!("Failed to parse tool args for {}: {}", func_name, e);
+                                        // Inline-resolve this call by recording the failure as a
+                                        // synthetic "tool" message. Pending is decremented so it may
+                                        // become empty; but since no execute was dispatched, nothing
+                                        // will publish on `tool_results_topic` to drive send_conversation.
                                         let mut s = state.lock().await;
                                         s.add_tool_result(&tool_call_id, &func_name, format!("Error parsing arguments: {}", e), false);
                                         s.resolve_tool_call(&tool_call_id);
@@ -366,6 +377,45 @@ impl Actor for AgentActor {
                                     exec_payload,
                                 );
                                 let _ = bus.publish(&self.id(), exec_msg).await;
+                                dispatch_count += 1;
+                            }
+
+                            // If nothing was dispatched (every call failed inline parsing) and the
+                            // batch is fully resolved, drive a follow-up LLM turn ourselves so the
+                            // conversation does not stall waiting for tool results that will never arrive.
+                            if !tool_calls.is_empty() && dispatch_count == 0 {
+                                let mut s = state.lock().await;
+                                if s.all_tool_calls_resolved() {
+                                    let pending = s.drain_pending_messages();
+                                    if !pending.is_empty() {
+                                        s.reset_iteration();
+                                        for m in &pending {
+                                            s.add_user_message(m.clone());
+                                            // Notify TUI that this pending message is now displayed
+                                            let displayed_msg = Message::new(
+                                                &self.stream_output_topic,
+                                                &self.id(),
+                                                m.clone(),
+                                            ).with_type("UserMessageDisplayed");
+                                            let _ = bus.publish(&self.id(), displayed_msg).await;
+                                        }
+                                    }
+                                    if s.max_reached(self.max_iterations) {
+                                        drop(s);
+                                        let warn_msg = Message::new(
+                                            &self.stream_output_topic,
+                                            &self.id(),
+                                            format!("Max iterations ({}) reached", self.max_iterations),
+                                        ).with_type("Warning");
+                                        let _ = bus.publish(&self.id(), warn_msg).await;
+                                    } else {
+                                        let messages = s.build_messages_with_system(&self.system_message);
+                                        drop(s);
+                                        if let Err(e) = self.send_conversation(bus, &messages).await {
+                                            error!("Failed to send conversation after inline tool parse errors: {}", e);
+                                        }
+                                    }
+                                }
                             }
                         }
                         Err(RecvError::Lagged(n)) => warn!("Agent {} tool_calls lagged: {}", self.index, n),
