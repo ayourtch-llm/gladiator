@@ -101,7 +101,7 @@ Keep each conclusion to one or two sentences — the distilled decision, not a t
 
 # Planning with todos
 For any task with 3+ steps, call `todo_write` FIRST with the plan before touching code. One item `in_progress` at a time — mark it `completed` the instant it's done, mark the next one `in_progress`, and re-send the whole list (each call replaces the previous). Update the list whenever the plan changes: new sub-task discovered, step dropped, scope shifts. Skip the list for trivial single-step answers.
-After `todo_write`, immediately continue the same turn with the first real tool call — do not pause for confirmation. If a saved session is resumed, call `todo_read` once to recall where work left off, then continue.
+After `todo_write`, immediately continue the same turn with the first real tool call — do not pause for confirmation. If a saved session is resumed, call `todo_read` once to recall where work left off, then continue. `todo_read` also reports the live token budget (used / window / remaining) — when remaining drops below ~20%, write a handoff note and call `restart_from_file` to shed the context.
 
 # Restarting context
 When the conversation is getting long, hard to follow, or visually corrupted, FIRST write a self-contained handoff note (goal, what's done, what's next, key file paths) to a file with `write`, THEN call `restart_from_file` with that path. It backs up the current context to /tmp, clears history, and continues from your handoff. Invoke it ALONE — never batch it with other tool calls. Resume by calling `todo_read` to recover the plan, then keep going.
@@ -145,8 +145,8 @@ Use the skill tool to load a skill when a task matches its description.
 <available_skills>
   <skill>
     <name>context-refresh</name>
-    <description>Autonomously refresh a full/near-full context window mid-task WITHOUT losing progress — write a self-contained handoff.md, schedule a wakeup that says "read handoff.md and continue", then self-inject /clear. Use during long autonomous work (multi-hour debugging, regression chasing, big multi-step builds) when context is filling and meaningful work remains. Do NOT use with under ~30 min of work left, or while harness-tracked background work is still running.</description>
-    <location>file:///Users/ayourtch/.claude/skills/context-refresh/SKILL.md</location>
+    <description>Autonomously refresh a full/near-full context window mid-task WITHOUT losing progress — When the conversation is getting long, hard to follow, or visually corrupted, FIRST write a self-contained handoff note (goal, what's done, what's next, key file paths) to a file with `write`, THEN call `restart_from_file` with that path. It backs up the current context to /tmp, clears history, and continues from your handoff. Invoke it ALONE — never batch it with other tool calls. Resume by calling `todo_read` to recover the plan, then keep going.
+Use during long autonomous work (multi-hour debugging, regression chasing, big multi-step builds) when context is filling and meaningful work remains. Do NOT use while harness-tracked background work is still running.</description>
   </skill>
   <skill>
     <name>customize-gladiator</name>

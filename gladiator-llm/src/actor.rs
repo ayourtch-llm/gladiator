@@ -76,6 +76,8 @@ impl LlmActor {
         bus: &gladiator_core::Bus,
         stream_id: &str,
         rx_chars: usize,
+        usage: Option<crate::event::Usage>,
+        context_window: Option<usize>,
     ) {
         let end_msg = gladiator_core::Message::new(
             &self.stream_topic,
@@ -88,10 +90,23 @@ impl LlmActor {
             tracing::error!("Failed to publish stream end: {}", e);
         }
 
+        let stats = StreamStats {
+            rx_chars,
+            usage,
+            context_window,
+        };
         let stats_msg = gladiator_core::Message::new(
             &self.stats_topic,
             &self.id(),
-            serde_json::to_value(&StreamStats { rx_chars }).unwrap(),
+            serde_json::to_value(&stats).unwrap_or_else(|e| {
+                tracing::error!("Failed to serialize StreamStats: {}", e);
+                serde_json::to_value(&StreamStats {
+                    rx_chars,
+                    usage: None,
+                    context_window: None,
+                })
+                .unwrap()
+            }),
         )
         .with_type("StreamStats")
         .with_stream_id(stream_id.to_string());
@@ -211,7 +226,14 @@ impl LlmActor {
                     }
                 }
                 Ok(Some(Err(e))) => {
-                    self.publish_stream_end_and_stats(bus, stream_id, rx_chars).await;
+                    self.publish_stream_end_and_stats(
+                        bus,
+                        stream_id,
+                        rx_chars,
+                        state.usage.clone(),
+                        config.context_window,
+                    )
+                    .await;
                     return Err(crate::error::LlmError::StreamInterrupted(
                         full_response.len(),
                         e.to_string(),
@@ -219,7 +241,14 @@ impl LlmActor {
                 }
                 Ok(None) => break,
                 Err(_) => {
-                    self.publish_stream_end_and_stats(bus, stream_id, rx_chars).await;
+                    self.publish_stream_end_and_stats(
+                        bus,
+                        stream_id,
+                        rx_chars,
+                        state.usage.clone(),
+                        config.context_window,
+                    )
+                    .await;
                     return Err(crate::error::LlmError::StreamInterrupted(
                         full_response.len(),
                         "stream timeout".to_string(),
@@ -228,7 +257,14 @@ impl LlmActor {
             }
         }
 
-        self.publish_stream_end_and_stats(bus, stream_id, rx_chars).await;
+        self.publish_stream_end_and_stats(
+            bus,
+            stream_id,
+            rx_chars,
+            state.usage.clone(),
+            config.context_window,
+        )
+        .await;
 
         Ok((full_response, state.tool_calls))
     }

@@ -242,6 +242,13 @@ pub struct LlmConfig {
     pub max_retries: u32,
     #[serde(default = "default_retry_base_delay_ms")]
     pub retry_base_delay_ms: u64,
+    /// Maximum context window (in tokens) for the configured model. Used to
+    /// compute "tokens remaining" from the per-turn `usage.prompt_tokens`
+    /// returned by the provider. If `None`, gladiator probes `/v1/models` at
+    /// startup and falls back to leaving the metric unreported when the probe
+    /// fails or returns no recognisable field.
+    #[serde(default)]
+    pub context_window: Option<usize>,
 }
 
 impl Default for LlmConfig {
@@ -256,6 +263,7 @@ impl Default for LlmConfig {
             stream_timeout_secs: default_stream_timeout_secs(),
             max_retries: default_max_retries(),
             retry_base_delay_ms: default_retry_base_delay_ms(),
+            context_window: None,
         }
     }
 }

@@ -174,6 +174,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing::info!("LLM base_url: {}", config.llm.base_url);
     tracing::info!("Agent max_iterations: {}", config.agent.max_iterations);
 
+    // Discover the model's context window when not supplied via config. The
+    // agent uses it to report "tokens remaining" alongside per-turn usage. If
+    // the probe fails the metric is simply left unavailable.
+    if config.llm.context_window.is_none() {
+        match gladiator_llm::fetch_context_window(
+            &config.llm.base_url,
+            &config.llm.api_key,
+            &config.llm.model,
+        )
+        .await
+        {
+            Some(window) => {
+                tracing::info!(
+                    "LLM context_window probed: {} tokens (set [llm].context_window to override)",
+                    window
+                );
+                config.llm.context_window = Some(window);
+            }
+            None => {
+                tracing::warn!(
+                    "LLM context_window unknown; context-remaining metric disabled. \
+                     Set [llm].context_window in gladiator.toml to enable it."
+                );
+            }
+        }
+    } else {
+        tracing::info!(
+            "LLM context_window: {} tokens (from config)",
+            config.llm.context_window.unwrap()
+        );
+    }
+
     let bus = Bus::new();
     setup_topics(&bus, &config).await;
 
@@ -245,7 +277,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         defs.extend(gladiator_agent::internal_tools::internal_tool_defs());
         defs
     })
-    .with_state_topics(config.topics.agent_state_control.clone(), config.topics.agent_state.clone());
+    .with_state_topics(config.topics.agent_state_control.clone(), config.topics.agent_state.clone())
+    .with_llm_stats_topic(config.topics.llm_stats.clone())
+    .with_context_window(config.llm.context_window);
 
     let agent_handle = bus.spawn_actor(agent_actor).await?;
 

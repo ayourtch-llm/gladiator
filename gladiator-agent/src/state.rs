@@ -29,6 +29,26 @@ pub struct ConversationState {
     /// Transient: not serialized.
     #[serde(skip)]
     pub tool_call_order: Vec<String>,
+    /// Last reported token usage from the LLM (`StreamStats.usage`),
+    /// published at end-of-stream by the LLM actor. Transient: not
+    /// serialized — refreshed each turn from the live bus.
+    #[serde(skip)]
+    pub last_usage: Option<Usage>,
+    /// Model context window in tokens, when known. Transient: not
+    /// serialized — populated at agent startup from LlmConfig.
+    #[serde(skip)]
+    pub context_window: Option<usize>,
+}
+
+/// Subset of `gladiator_llm::Usage` mirrored locally so the agent crate
+/// doesn't need a direct dep on gladiator-llm just for the field shape.
+/// Constructed from a `StreamStats` payload at the bus boundary.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Usage {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
 }
 
 impl ConversationState {
@@ -269,6 +289,55 @@ impl ConversationState {
     /// Rendered snapshot of the current todo list (empty-safe).
     pub fn todos_render(&self) -> String {
         render_todos(&self.todos)
+    }
+
+    /// Record the latest per-turn usage stats. Called when a `StreamStats`
+    /// message arrives on the bus. Also updates `context_window` if the
+    /// stats carry one (so a runtime probe by the LLM actor propagates here).
+    pub fn record_usage(
+        &mut self,
+        usage: Usage,
+        context_window: Option<usize>,
+    ) {
+        self.last_usage = Some(usage);
+        if let Some(w) = context_window {
+            self.context_window = Some(w);
+        }
+    }
+
+    /// Tokens remaining in the context window, computed from the last reported
+    /// usage. `None` when either piece is unknown.
+    pub fn context_remaining(&self) -> Option<u64> {
+        let window = self.context_window? as u64;
+        let used = self
+            .last_usage
+            .as_ref()
+            .and_then(|u| u.input_tokens)
+            .unwrap_or(0);
+        window.checked_sub(used)
+    }
+
+    /// Human-readable one-line context status for tool results / logs.
+    pub fn context_status_line(&self) -> String {
+        match (self.context_remaining(), &self.last_usage) {
+            (Some(remaining), Some(u)) => {
+                let used = u.input_tokens.unwrap_or(0);
+                let pct = if self.context_window.unwrap_or(0) > 0 {
+                    (used as f64 / self.context_window.unwrap() as f64) * 100.0
+                } else {
+                    0.0
+                };
+                format!(
+                    "context: {}/{} tokens used ({:.0}%), {} remaining",
+                    used, self.context_window.unwrap(), pct, remaining
+                )
+            }
+            (None, Some(u)) => format!(
+                "context: {} input tokens used (window unknown)",
+                u.input_tokens.unwrap_or(0)
+            ),
+            _ => "context: no usage reported yet".to_string(),
+        }
     }
 
     /// Wipe the entire conversation context: messages, todos, pending tool

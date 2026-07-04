@@ -47,6 +47,7 @@ pub fn merge_config(
             } else {
                 req.retry_base_delay_ms
             },
+            context_window: req.context_window.or(base.context_window),
         },
         None => base.clone(),
     }

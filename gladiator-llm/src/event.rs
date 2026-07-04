@@ -104,4 +104,12 @@ impl LlmResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamStats {
     pub rx_chars: usize,
+    /// Token accounting from the most recent `Finish` event. `None` when the
+    /// provider did not include a `usage` block in the stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+    /// Model context window in tokens, when known. Lets subscribers compute
+    /// "tokens remaining" as `context_window - usage.input_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<usize>,
 }

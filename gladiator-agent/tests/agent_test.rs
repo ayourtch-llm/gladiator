@@ -678,3 +678,80 @@ async fn persistence_actor_multiple_instances() {
     assert_eq!(actor0.announce().id, "gladiator-persistence-0");
     assert_eq!(actor1.announce().id, "gladiator-persistence-1");
 }
+
+// =========================================================================
+// Context-usage tracking
+// =========================================================================
+
+#[test]
+fn context_remaining_unknown_when_window_unset() {
+    let state = ConversationState::new();
+    assert_eq!(state.context_remaining(), None);
+    assert!(state.context_status_line().contains("no usage reported"));
+}
+
+#[test]
+fn context_remaining_with_window_but_no_usage() {
+    let mut state = ConversationState::new();
+    state.context_window = Some(128_000);
+    // No usage reported yet — remaining is the full window, but status line
+    // still nudges that no usage has been seen.
+    assert_eq!(state.context_remaining(), Some(128_000));
+    assert!(state.context_status_line().contains("no usage reported"));
+}
+
+#[test]
+fn context_remaining_subtracts_input_tokens() {
+    let mut state = ConversationState::new();
+    state.context_window = Some(128_000);
+    state.record_usage(
+        Usage {
+            input_tokens: Some(32_000),
+            output_tokens: Some(1_000),
+            total_tokens: Some(33_000),
+            reasoning_tokens: None,
+        },
+        None,
+    );
+    assert_eq!(state.context_remaining(), Some(96_000));
+    let line = state.context_status_line();
+    assert!(line.contains("32000"), "line missing used tokens: {}", line);
+    assert!(line.contains("128000"), "line missing window: {}", line);
+    assert!(line.contains("96000"), "line missing remaining: {}", line);
+    assert!(line.contains("25%"), "line missing percentage: {}", line);
+}
+
+#[test]
+fn record_usage_propagates_context_window_from_stats() {
+    let mut state = ConversationState::new();
+    // A StreamStats message may carry the window even if the agent was seeded
+    // without one at startup (e.g. probe raced and arrived late).
+    state.record_usage(
+        Usage {
+            input_tokens: Some(100),
+            output_tokens: None,
+            total_tokens: None,
+            reasoning_tokens: None,
+        },
+        Some(8192),
+    );
+    assert_eq!(state.context_window, Some(8192));
+    assert_eq!(state.context_remaining(), Some(8092));
+}
+
+#[test]
+fn context_status_line_without_window_shows_input_only() {
+    let mut state = ConversationState::new();
+    state.record_usage(
+        Usage {
+            input_tokens: Some(500),
+            output_tokens: None,
+            total_tokens: None,
+            reasoning_tokens: None,
+        },
+        None,
+    );
+    let line = state.context_status_line();
+    assert!(line.contains("500"), "missing token count: {}", line);
+    assert!(line.contains("window unknown"), "expected 'window unknown': {}", line);
+}

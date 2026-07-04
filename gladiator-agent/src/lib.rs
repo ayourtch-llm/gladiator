@@ -9,4 +9,4 @@ pub use internal_tools::{
     InternalToolOutcome, TodoEntry, TodoStatus,
 };
 pub use persistence::PersistenceActor;
-pub use state::ConversationState;
+pub use state::{ConversationState, Usage};

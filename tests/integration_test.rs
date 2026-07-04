@@ -698,3 +698,129 @@ async fn test_agent_restart_from_file_clears_and_reinjects() {
     let _ = std::fs::remove_file(&handoff_path);
     agent_handle.stop().await;
 }
+
+/// StreamStats messages from the LLM actor carry per-turn usage + the
+/// discovered context window. The agent must subscribe, record them into
+/// ConversationState, and surface "tokens remaining" through todo_read.
+#[tokio::test]
+async fn test_agent_consumes_stream_stats_and_reports_via_todo_read() {
+    let bus = Bus::new();
+
+    let llm_in = "llm:in";
+    let llm_out = "llm:out";
+    let llm_stream = "llm:stream";
+    let llm_tool_calls = "llm:tool_calls";
+    let llm_stats = "llm:stats";
+    let tool_results = "tool:results";
+    let agent_in = "agent:in";
+    let agent_stream = "agent:stream";
+
+    for topic in &[
+        llm_in, llm_out, llm_stream, llm_tool_calls, llm_stats, tool_results, agent_in, agent_stream,
+    ] {
+        bus.create_topic(topic, 100).await;
+    }
+
+    bus.register_announcement(gladiator_core::ActorAnnouncement {
+        id: "mock-llm".to_string(),
+        subscriptions: vec![llm_in.to_string()],
+        publications: vec![
+            llm_out.to_string(),
+            llm_stream.to_string(),
+            llm_tool_calls.to_string(),
+            llm_stats.to_string(),
+        ],
+    })
+    .await;
+    let mut llm_rx = bus.subscribe("mock-llm", llm_in).await.unwrap();
+
+    let tool_defs = gladiator_agent::internal_tools::internal_tool_defs();
+    let agent = AgentActor::new(
+        0, agent_in.to_string(),
+        llm_in.to_string(),   llm_out.to_string(),
+        llm_stream.to_string(), llm_tool_calls.to_string(),
+        tool_results.to_string(), agent_stream.to_string(),
+        AgentConfig::default(),
+    )
+    .with_tool_defs(tool_defs)
+    .with_llm_stats_topic(llm_stats.to_string())
+    .with_context_window(Some(128_000));
+    let agent_handle = bus.spawn_actor(agent).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Publish a StreamStats message as the LLM actor would after a turn.
+    let stats_payload = serde_json::json!({
+        "rx_chars": 1234,
+        "usage": {
+            "input_tokens": 32000,
+            "output_tokens": 500,
+            "total_tokens": 32500
+        },
+        "context_window": 128000
+    });
+    bus.publish(
+        "mock-llm",
+        Message::new(llm_stats, "mock-llm", stats_payload).with_type("StreamStats"),
+    )
+    .await
+    .unwrap();
+
+    // Drive the agent with user input, then have the mock respond with a
+    // todo_read so we can inspect what the agent reports.
+    bus.register_announcement(gladiator_core::ActorAnnouncement {
+        id: "test-user".to_string(),
+        subscriptions: vec![],
+        publications: vec![agent_in.to_string()],
+    })
+    .await;
+    let _ = bus
+        .publish("test-user", Message::new(agent_in, "test-user", "check status").with_type("UserInput"))
+        .await;
+    let _ = timeout(Duration::from_secs(5), llm_rx.recv())
+        .await
+        .expect("initial LLM request");
+
+    // Mock replies with a todo_read tool call.
+    let read_call = serde_json::json!([{
+        "id": "call_read_1", "type": "function",
+        "function": {"name": "todo_read", "arguments": "{}"}
+    }]);
+    bus.publish(
+        "mock-llm",
+        Message::new(llm_tool_calls, "mock-llm", read_call).with_type("LlmToolCalls"),
+    )
+    .await
+    .unwrap();
+
+    // Follow-up LLM request carries the tool result, which must include the
+    // context status line reflecting the stats we published.
+    let follow_up = timeout(Duration::from_secs(5), llm_rx.recv())
+        .await
+        .expect("follow-up after todo_read")
+        .unwrap();
+    let parsed: LlmRequest =
+        serde_json::from_value(follow_up.payload).expect("parse follow-up");
+    let messages = parsed.messages.expect("messages");
+    let tool_msg = messages
+        .iter()
+        .find(|m| m["role"] == "tool" && m["name"] == "todo_read")
+        .expect("expected todo_read tool result");
+    let content = tool_msg["content"].as_str().unwrap_or("");
+    assert!(
+        content.contains("32000"),
+        "expected used tokens in todo_read output: {}",
+        content
+    );
+    assert!(
+        content.contains("128000"),
+        "expected window size in todo_read output: {}",
+        content
+    );
+    assert!(
+        content.contains("96000"),
+        "expected remaining tokens in todo_read output: {}",
+        content
+    );
+
+    agent_handle.stop().await;
+}

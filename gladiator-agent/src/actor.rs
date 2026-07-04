@@ -41,6 +41,13 @@ pub struct AgentActor {
     pub tool_timeout_secs: u64,
     pub state_control_topic: String,
     pub state_topic: String,
+    /// LLM stats topic to subscribe to for per-turn usage / context window.
+    /// Empty means "do not subscribe" (used by tests that don't publish stats).
+    pub llm_stats_topic: String,
+    /// Context window discovered at startup (from LlmConfig, which may itself
+    /// have probed /v1/models). Seeded into ConversationState on first use so
+    /// the agent can compute "tokens remaining" before the first stats arrive.
+    pub context_window: Option<usize>,
 }
 
 impl AgentActor {
@@ -71,6 +78,8 @@ impl AgentActor {
             tool_timeout_secs: 300,
             state_control_topic: String::new(),
             state_topic: String::new(),
+            llm_stats_topic: String::new(),
+            context_window: None,
         }
     }
 
@@ -97,6 +106,19 @@ impl AgentActor {
     pub fn with_state_topics(mut self, control: String, state: String) -> Self {
         self.state_control_topic = control;
         self.state_topic = state;
+        self
+    }
+
+    /// Subscribe to the LLM stats topic for per-turn usage / context-window
+    /// updates. Pair with `with_context_window` to seed the initial window.
+    pub fn with_llm_stats_topic(mut self, topic: String) -> Self {
+        self.llm_stats_topic = topic;
+        self
+    }
+
+    /// Seed the model context window (in tokens) discovered at startup.
+    pub fn with_context_window(mut self, window: Option<usize>) -> Self {
+        self.context_window = window;
         self
     }
 
@@ -197,7 +219,11 @@ impl AgentActor {
             }
             "todo_read" => {
                 let s = state.lock().await;
-                InternalToolOutcome::ok(s.todos_render())
+                let mut out = s.todos_render();
+                // Append live context-usage so the model can see how much
+                // budget remains when deciding whether to restart_from_file.
+                out.push_str(&format!("\n{}", s.context_status_line()));
+                InternalToolOutcome::ok(out)
             }
             "restart_from_file" => self.handle_restart_from_file(args, state).await,
             _ => InternalToolOutcome::err(format!("Unknown internal tool: {}", name)),
@@ -351,6 +377,9 @@ impl Actor for AgentActor {
         if !self.state_control_topic.is_empty() {
             subs.push(self.state_control_topic.clone());
         }
+        if !self.llm_stats_topic.is_empty() {
+            subs.push(self.llm_stats_topic.clone());
+        }
         if !self.state_topic.is_empty() {
             pubs.push(self.state_topic.clone());
         }
@@ -365,6 +394,12 @@ impl Actor for AgentActor {
         let state: Arc<tokio::sync::Mutex<ConversationState>> =
             Arc::new(tokio::sync::Mutex::new(ConversationState::new()));
 
+        // Seed the discovered context window so the agent can report it before
+        // the first StreamStats message arrives.
+        if let Some(w) = self.context_window {
+            state.lock().await.context_window = Some(w);
+        }
+
         let mut input_rx = bus.subscribe(&self.id(), &self.input_topic).await?;
         let mut out_rx = bus.subscribe(&self.id(), &self.llm_out_topic).await?;
         let mut stream_rx = bus.subscribe(&self.id(), &self.llm_stream_topic).await?;
@@ -374,6 +409,14 @@ impl Actor for AgentActor {
         let mut state_control_rx: Option<tokio::sync::broadcast::Receiver<gladiator_core::Message>> =
             if !self.state_control_topic.is_empty() {
                 Some(bus.subscribe(&self.id(), &self.state_control_topic).await?)
+            } else {
+                None
+            };
+
+        // Optional stats subscription for per-turn usage + context-window.
+        let mut stats_rx: Option<tokio::sync::broadcast::Receiver<gladiator_core::Message>> =
+            if !self.llm_stats_topic.is_empty() {
+                Some(bus.subscribe(&self.id(), &self.llm_stats_topic).await?)
             } else {
                 None
             };
@@ -761,6 +804,60 @@ impl Actor for AgentActor {
                     let s = state.lock().await;
                     if !s.pending_tool_calls.is_empty() {
                         warn!("Agent {} has {} pending tool calls (watchdog tick)", self.index, s.pending_tool_calls.len());
+                    }
+                }
+                result = async {
+                    match &mut stats_rx {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    match result {
+                        Ok(msg) => {
+                            // StreamStats carries per-turn usage + context_window.
+                            // Record into state so todo_read / context_status_line
+                            // reflect the latest numbers, and warn proactively
+                            // when remaining budget drops below 20%.
+                            let usage = crate::state::Usage {
+                                input_tokens: msg.payload.get("usage")
+                                    .and_then(|u| u.get("input_tokens")).and_then(|v| v.as_u64()),
+                                output_tokens: msg.payload.get("usage")
+                                    .and_then(|u| u.get("output_tokens")).and_then(|v| v.as_u64()),
+                                total_tokens: msg.payload.get("usage")
+                                    .and_then(|u| u.get("total_tokens")).and_then(|v| v.as_u64()),
+                                reasoning_tokens: msg.payload.get("usage")
+                                    .and_then(|u| u.get("reasoning_tokens")).and_then(|v| v.as_u64()),
+                            };
+                            let ctx_window = msg.payload.get("context_window")
+                                .and_then(|v| v.as_u64())
+                                .map(|v| v as usize);
+                            let status = {
+                                let mut s = state.lock().await;
+                                s.record_usage(usage, ctx_window);
+                                s.context_status_line()
+                            };
+                            debug!("Agent {}: {}", self.index, status);
+                            // If we're close to the limit, surface a chat-level
+                            // warning so the model (and the user) notice.
+                            let remaining = state.lock().await.context_remaining();
+                            let window = state.lock().await.context_window;
+                            if let (Some(rem), Some(win)) = (remaining, window) {
+                                if win > 0 && rem * 5 < win as u64 {
+                                    let warn_msg = Message::new(
+                                        &self.stream_output_topic,
+                                        &self.id(),
+                                        format!(
+                                            "Context nearly full: {} tokens remaining ({}%). Consider calling restart_from_file with a handoff note.",
+                                            rem,
+                                            (rem as f64 / win as f64 * 100.0) as u64
+                                        ),
+                                    ).with_type("Warning");
+                                    let _ = bus.publish(&self.id(), warn_msg).await;
+                                }
+                            }
+                        }
+                        Err(RecvError::Lagged(_)) => {}
+                        Err(RecvError::Closed) => {}
                     }
                 }
             }

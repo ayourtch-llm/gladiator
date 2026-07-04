@@ -21,6 +21,7 @@ fn llm_config() -> LlmConfig {
         stream_timeout_secs: 300,
         max_retries: 3,
         retry_base_delay_ms: 500,
+        context_window: None,
     }
 }
 

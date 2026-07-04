@@ -371,6 +371,7 @@ fn config_merge_override_takes_precedence() {
         stream_timeout_secs: 300,
         max_retries: 3,
         retry_base_delay_ms: 500,
+        context_window: Some(8192),
     };
     let override_cfg = gladiator_core::LlmConfig {
         model: "override-model".to_string(),
@@ -382,6 +383,7 @@ fn config_merge_override_takes_precedence() {
         stream_timeout_secs: 0,
         max_retries: 0,
         retry_base_delay_ms: 0,
+        context_window: None,
     };
     let merged = merge_config(&base, Some(&override_cfg));
     assert_eq!(merged.model, "override-model");
@@ -389,6 +391,7 @@ fn config_merge_override_takes_precedence() {
     assert_eq!(merged.api_key, "base-key");
     assert_eq!(merged.temperature, 0.5);
     assert_eq!(merged.max_tokens, 4096);
+    assert_eq!(merged.context_window, Some(8192), "merge should inherit base context_window when override is None");
 }
 
 #[test]
