@@ -18,6 +18,7 @@ pub mod tool_runtime;
 pub mod generate_object;
 pub mod openai_chat;
 pub mod actor;
+pub mod standalone;
 
 // Re-export public API
 pub use error::LlmError;
@@ -40,3 +41,4 @@ pub use tool_runtime::{Tool, ToolRuntime};
 pub use generate_object::GenerateObject;
 pub use openai_chat::OpenAIChatProtocol;
 pub use actor::LlmActor;
+pub use standalone::llm_call;
