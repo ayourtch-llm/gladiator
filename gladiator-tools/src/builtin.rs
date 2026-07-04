@@ -3,6 +3,8 @@ use async_trait::async_trait;
 use gladiator_core::config::SandboxConfig;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 
 const MAX_READ_SIZE: usize = 1_048_576; // 1 MiB
@@ -306,6 +308,10 @@ impl Tool for EditFileTool {
 pub struct BashTool {
     working_dir: String,
     sandbox: SandboxConfig,
+    /// Runtime toggle for sandbox.enabled. When Some, the execute method
+    /// reads this flag instead of `self.sandbox.enabled`, allowing `/sandbox on|off`
+    /// to flip behavior without restarting the tool actor.
+    enabled_override: Option<Arc<AtomicBool>>,
 }
 
 impl BashTool {
@@ -313,6 +319,7 @@ impl BashTool {
         Self {
             working_dir: ".".to_string(),
             sandbox: SandboxConfig::default(),
+            enabled_override: None,
         }
     }
 
@@ -320,6 +327,7 @@ impl BashTool {
         Self {
             working_dir: working_dir.into(),
             sandbox: SandboxConfig::default(),
+            enabled_override: None,
         }
     }
 
@@ -327,6 +335,26 @@ impl BashTool {
         Self {
             working_dir: working_dir.into(),
             sandbox,
+            enabled_override: None,
+        }
+    }
+
+    /// Construct a BashTool whose `sandbox.enabled` flag can be toggled at
+    /// runtime via the shared `Arc<AtomicBool>`. The TUI `/sandbox on|off`
+    /// command flips this atomically. When the override is present, execute()
+    /// reads from it instead of the static config value.
+    pub fn with_sandbox_toggle(
+        working_dir: impl Into<String>,
+        sandbox: SandboxConfig,
+        enabled_override: Arc<AtomicBool>,
+    ) -> Self {
+        // Seed the atomic with the current config value so toggling starts
+        // from a known state.
+        enabled_override.store(sandbox.enabled, Ordering::Relaxed);
+        Self {
+            working_dir: working_dir.into(),
+            sandbox,
+            enabled_override: Some(enabled_override),
         }
     }
 
@@ -479,7 +507,11 @@ impl Tool for BashTool {
         // Use sandbox-exec on macOS if sandbox is enabled
         #[cfg(target_os = "macos")]
         {
-            if self.sandbox.enabled {
+            let sandbox_enabled = match &self.enabled_override {
+                Some(flag) => flag.load(Ordering::Relaxed),
+                None => self.sandbox.enabled,
+            };
+            if sandbox_enabled {
                 let resolved = self.resolve_working_dir(&work_dir)?;
                 let resolved_str = resolved.to_string_lossy().to_string();
                 let profile = self.generate_sandbox_profile(&resolved_str);

@@ -609,6 +609,7 @@ pub async fn run_app(
     topics: &TopicsConfig,
     working_dir: &str,
     debug_flag: Arc<AtomicBool>,
+    sandbox_toggle: Arc<AtomicBool>,
 ) -> io::Result<()> {
     let theme = Theme::default_dark();
     let mut app = App::new(theme);
@@ -769,6 +770,21 @@ pub async fn run_app(
                                                     "Debug mode disabled",
                                                 ));
                                                 app.set_status("Debug: OFF");
+                                            }
+                                            app.scroll_mut().scroll_to_bottom();
+                                        }
+                                        TuiCommand::Sandbox(enabled) => {
+                                            sandbox_toggle.store(enabled, Ordering::Relaxed);
+                                            if enabled {
+                                                app.chat_mut().add_message(AppMessage::system(
+                                                    "Sandbox enabled — bash commands run under sandbox-exec",
+                                                ));
+                                                app.set_status("Sandbox: ON");
+                                            } else {
+                                                app.chat_mut().add_message(AppMessage::system(
+                                                    "Sandbox disabled — bash commands run without sandboxing",
+                                                ));
+                                                app.set_status("Sandbox: OFF");
                                             }
                                             app.scroll_mut().scroll_to_bottom();
                                         }

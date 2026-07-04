@@ -212,8 +212,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Build tool registry — register built-in tools based on ToolsConfig toggles
     let mut registry = ToolRegistry::new();
     let working_dir = config.agent.working_dir.clone();
+
+    // Shared runtime toggle for the bash sandbox. The TUI `/sandbox on|off`
+    // command flips this atomically; BashTool reads it at execute time.
+    let sandbox_toggle = Arc::new(AtomicBool::new(config.tools.sandbox.enabled));
+
     if config.tools.bash {
-        registry.add(Box::new(BashTool::with_sandbox(&working_dir, config.tools.sandbox.clone())));
+        registry.add(Box::new(BashTool::with_sandbox_toggle(
+            &working_dir,
+            config.tools.sandbox.clone(),
+            sandbox_toggle.clone(),
+        )));
     }
     if config.tools.read {
         registry.add(Box::new(ReadFileTool::with_working_dir(&working_dir)));
@@ -370,7 +379,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         });
 
         // Run TUI app
-        match gladiator_tui::app::run_app(bus.clone(), user_input_tx, &config.topics, &config.agent.working_dir, debug_flag.clone()).await {
+        match gladiator_tui::app::run_app(bus.clone(), user_input_tx, &config.topics, &config.agent.working_dir, debug_flag.clone(), sandbox_toggle.clone()).await {
             Ok(()) => {}
             Err(e) => tracing::error!("TUI error: {}", e),
         }

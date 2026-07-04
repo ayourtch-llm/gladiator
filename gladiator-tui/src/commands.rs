@@ -7,6 +7,7 @@ pub enum TuiCommand {
     Load(String),
     Fixme(String),
     Debug(bool),
+    Sandbox(bool),
 }
 
 /// Parse a user input string for TUI commands.
@@ -33,6 +34,10 @@ pub fn parse_tui_command(text: &str) -> Option<TuiCommand> {
         return Some(TuiCommand::Debug(true));
     } else if trimmed == "/debug off" {
         return Some(TuiCommand::Debug(false));
+    } else if trimmed == "/sandbox" || trimmed == "/sandbox on" {
+        return Some(TuiCommand::Sandbox(true));
+    } else if trimmed == "/sandbox off" {
+        return Some(TuiCommand::Sandbox(false));
     }
     None
 }
@@ -140,5 +145,16 @@ mod tests {
             parse_tui_command("/debug off   "),
             Some(TuiCommand::Debug(false))
         );
+    }
+
+    #[test]
+    fn parse_sandbox_on() {
+        assert_eq!(parse_tui_command("/sandbox"), Some(TuiCommand::Sandbox(true)));
+        assert_eq!(parse_tui_command("/sandbox on"), Some(TuiCommand::Sandbox(true)));
+    }
+
+    #[test]
+    fn parse_sandbox_off() {
+        assert_eq!(parse_tui_command("/sandbox off"), Some(TuiCommand::Sandbox(false)));
     }
 }
