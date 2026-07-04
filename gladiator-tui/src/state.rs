@@ -334,8 +334,19 @@ impl InputState {
 
         let logical_str = logical_lines[target_logical];
 
-        // Target char position within the logical line: visual line start + column
-        let target_col = layout.cursor_visual_col.min(target_info.char_count);
+        // Convert visual column to screen column (first visual line has prompt offset)
+        let screen_col = if layout.cursor_visual_line == 0 {
+            prompt_len + layout.cursor_visual_col
+        } else {
+            layout.cursor_visual_col
+        };
+        // Convert screen column back to target visual line's column
+        let target_col = if target_visual == 0 {
+            screen_col.saturating_sub(prompt_len)
+        } else {
+            screen_col
+        };
+        let target_col = target_col.min(target_info.char_count);
         let target_char_pos = target_info.char_start + target_col;
         let mut byte_in_line = 0usize;
         for ch in logical_str.chars().take(target_char_pos) {
@@ -369,8 +380,19 @@ impl InputState {
 
         let logical_str = logical_lines[target_logical];
 
-        // Target char position within the logical line: visual line start + column
-        let target_col = layout.cursor_visual_col.min(target_info.char_count);
+        // Convert visual column to screen column (first visual line has prompt offset)
+        let screen_col = if layout.cursor_visual_line == 0 {
+            prompt_len + layout.cursor_visual_col
+        } else {
+            layout.cursor_visual_col
+        };
+        // Convert screen column back to target visual line's column
+        let target_col = if target_visual == 0 {
+            screen_col.saturating_sub(prompt_len)
+        } else {
+            screen_col
+        };
+        let target_col = target_col.min(target_info.char_count);
         let target_char_pos = target_info.char_start + target_col;
         let mut byte_in_line = 0usize;
         for ch in logical_str.chars().take(target_char_pos) {
