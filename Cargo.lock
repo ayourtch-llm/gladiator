@@ -1427,6 +1427,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcp-tagged-fileops"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "regex",
+ "rmcp",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "mcp-websearch"
 version = "0.1.0"
 dependencies = [

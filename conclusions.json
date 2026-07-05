@@ -198,5 +198,9 @@
   {
     "id": "d7bb5a9c-bc1f-4dfe-b246-f2fe6d74f4ad",
     "text": "mcp-websearch committed (9b83404). Tavily web search MCP server with dotenvy .env loading, registered in gladiator.toml. Open fixmes: d5b7f13a (tool+result rendering), 970e44c1 (tagged-fileops from editing.txt), 84a572b8 (prefill ETA polynomial prediction), dec1dfd7/a88584e0/06d07481/74c02606 (mcp-rlsp LSP issues — blocked on RA returning null results, needs investigation of workspace_folders or rootUri format), 16728959 (MCP respawn/hot-reload — partially done via McpManager but stale binary issue remains), f9e9b370 (history.json persistence)."
+  },
+  {
+    "id": "82aa01a1-6cd6-4fe9-afab-40a32245bebe",
+    "text": "Fixme 970e44c1: Create mcp-tagged-fileops MCP server implementing antirez's tag-based EDIT tool. Design from editing.txt: READ/SEARCH return lines as \"lineNum:tag content\" where tag is a short checksum (4 chars). Edit by specifying line+tag+new_content — CAS verification via tag match instead of verbatim old text. Saves tokens vs current edit_file which requires full old_content. Plan: new mcp-websearch-style standalone MCP server with tools: tagged_read, tagged_search, tagged_edit. CRC32 or hash-based tags per line."
   }
 ]

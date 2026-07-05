@@ -103,3 +103,8 @@ expose = []
 command = ["target/release/mcp-websearch"]
 default = true
 expose = []
+
+[mcp_servers.mcp-tagged-fileops]
+command = ["target/release/mcp-tagged-fileops"]
+default = false
+expose = []

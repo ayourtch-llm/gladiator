@@ -10,6 +10,7 @@ members = [
     "mcp-random",
     "mcp-rlsp",
     "mcp-websearch",
+    "mcp-tagged-fileops",
 ]
 resolver = "2"
 
