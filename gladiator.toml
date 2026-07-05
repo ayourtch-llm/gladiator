@@ -95,6 +95,11 @@ default = true
 expose = []
 
 [mcp_servers.mcp-random]
-command = ["target/debug/mcp-random"]
+command = ["target/release/mcp-random"]
+default = true
+expose = []
+
+[mcp_servers.mcp-websearch]
+command = ["target/release/mcp-websearch"]
 default = true
 expose = []

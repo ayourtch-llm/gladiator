@@ -9,6 +9,7 @@ members = [
     "gladiator-server",
     "mcp-random",
     "mcp-rlsp",
+    "mcp-websearch",
 ]
 resolver = "2"
 
