@@ -190,5 +190,13 @@
   {
     "id": "6fb4152c-ed48-4b67-9145-876224411827",
     "text": "mcp-rlsp LSP integration progress: main.rs now calls start() before serve(), spawning RA upfront. client.rs has IO task via channels, ensure_started lazy init fallback, drain_until_quiet(3s) after initialize to absorb indexing notification burst (1300+ messages), removed wait_for_diagnostics entirely — read_response handles interleaved notifications naturally. MCP tool timeout bumped 10→120s in gladiator-tools/src/mcp.rs. RA stderr set to inherit for debugging. All LSP queries still return null/empty results even after draining — root cause unknown, possibly needs workspace_folders or longer indexing wait. Build clean, tests pass."
+  },
+  {
+    "id": "904351b1-e056-443c-bc54-e0ba79200c58",
+    "text": "Plan: Create mcp-websearch crate in gladiator workspace — standalone MCP server wrapping Tavily API. Reads TAVILY_API_KEY from env at runtime (not build time). Exposes single \"web_search\" tool with params: query, limit, topic, time_range. Register as MCP server in gladiator.toml like mcp-rlsp/mcp-random. Build, test via direct tool calls after restart."
+  },
+  {
+    "id": "d7bb5a9c-bc1f-4dfe-b246-f2fe6d74f4ad",
+    "text": "mcp-websearch committed (9b83404). Tavily web search MCP server with dotenvy .env loading, registered in gladiator.toml. Open fixmes: d5b7f13a (tool+result rendering), 970e44c1 (tagged-fileops from editing.txt), 84a572b8 (prefill ETA polynomial prediction), dec1dfd7/a88584e0/06d07481/74c02606 (mcp-rlsp LSP issues — blocked on RA returning null results, needs investigation of workspace_folders or rootUri format), 16728959 (MCP respawn/hot-reload — partially done via McpManager but stale binary issue remains), f9e9b370 (history.json persistence)."
   }
 ]
