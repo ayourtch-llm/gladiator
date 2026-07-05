@@ -131,24 +131,89 @@ impl RustAnalyzerClient {
 
         // Child handle is owned by the IO task (moved into closure).
         self.initialize().await?;
-        // Don't block on project indexing — RA queues LSP requests during indexing
-        // and responds once ready. read_response() handles interleaved notifications.
+        // Wait for RA to finish indexing before accepting tool calls.
+        // RA sends $/progress notifications: begin → report(N/M) → end, twice
+        // (first for project loading, then for file indexing). We wait until we've
+        // seen at least 2 "end" progress events and the channel goes quiet.
+        self.wait_for_indexing().await;
         Ok(())
     }
 
-    /// Read messages (responding to server requests, skipping notifications) until
-    /// no message arrives within `quiet_secs`. Used after initialize() to let RA's
-    /// initial project-load notification burst drain before we accept tool calls.
-    async fn drain_until_quiet(&mut self, quiet_secs: u64) {
-        let mut count = 0u32;
+    /// Wait for rust-analyzer to finish project loading + indexing by tracking
+    /// $/progress notifications. RA sends multiple begin/report/end cycles:
+    ///   Cycle 1: discovering sysroot (quick, no N/M counts)
+    ///   Cycle 2: cargo metadata (quick, reports "cargo metadata: started/finished")
+    ///   Cycle 3+: file indexing (slow, reports "N/M" or crate paths)
+    /// We wait until we see an "end" that follows progress reports containing
+    /// "/" (indicating N/M counts), meaning actual file indexing completed.
+    /// Wait for rust-analyzer to finish ALL project loading + indexing by draining
+    /// $/progress notifications until a quiet period (no messages for N seconds).
+    /// RA sends multiple begin/report/end cycles: sysroot discovery, cargo metadata,
+    /// then file indexing per crate group. We must wait for ALL of them to complete
+    /// before querying — sending requests during active indexing returns null.
+    async fn wait_for_indexing(&mut self) {
+        let mut end_count = 0u32;
+        // Quiet period: no messages for this long means indexing is done.
+        let quiet_duration = std::time::Duration::from_secs(3);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(180);
+
         loop {
+            if tokio::time::Instant::now() >= deadline {
+                dbg_log("wait_for_indexing: timeout (180s), proceeding anyway");
+                return;
+            }
             match self.receiver.as_mut() {
                 Some(rx) => {
-                    match tokio::time::timeout(
-                        std::time::Duration::from_secs(quiet_secs), rx.recv()).await
-                    {
-                        Ok(Some(msg_val)) => { self.handle_drained_message(&msg_val).await; count += 1; }
-                        _ => { dbg_log(&format!("drain_until_quiet: drained {count} messages, channel quiet")); return; },
+                    // Wait up to quiet_duration for the next message. If none arrives
+                    // within that window AND we've seen at least one END, indexing is done.
+                    match tokio::time::timeout(quiet_duration, rx.recv()).await {
+                        Ok(Some(msg_val)) => {
+                            let has_result = msg_val.get("result").is_some()
+                                || msg_val.get("error").is_some();
+                            if !has_result && msg_val.get("id").is_some() {
+                                // Server-initiated request (e.g. window/workDoneProgressCreate)
+                                let resp = json!({
+                                    "jsonrpc": "2.0",
+                                    "id": msg_val.get("id").cloned().unwrap(),
+                                    "result": Value::Null
+                                });
+                                self.send_message(&resp).await.ok();
+                            } else if !has_result {
+                                let method = msg_val
+                                    .get("method")
+                                    .and_then(|m| m.as_str())
+                                    .unwrap_or("");
+                                if method == "$/progress" {
+                                    let value =
+                                        msg_val.get("params").and_then(|p| p.get("value"));
+                                    let kind =
+                                        value.and_then(|v| v.get("kind")).and_then(|k| k.as_str()).unwrap_or("");
+                                    let message = value
+                                        .and_then(|v| v.get("message"))
+                                        .and_then(|m| m.as_str())
+                                        .unwrap_or("");
+                                    if kind == "end" {
+                                        end_count += 1;
+                                        dbg_log(&format!(
+                                            "wait_for_indexing: END #{end_count} ({message})"
+                                        ));
+                                    } else if !message.is_empty() {
+                                        let short = if message.len() > 60 { &message[..60] } else { message };
+                                        dbg_log(&format!("wait_for_indexing: {kind}: {short}"));
+                                    }
+                                }
+                            }
+                        }
+                        _ => {
+                            // No message within quiet_duration — indexing is done (if we saw any ENDs).
+                            if end_count > 0 {
+                                dbg_log(&format!(
+                                    "wait_for_indexing: complete after {end_count} END events, channel quiet"
+                                ));
+                                return;
+                            }
+                            // If no ENDs yet either, keep waiting (up to deadline)
+                        }
                     }
                 }
                 None => return,
@@ -156,57 +221,19 @@ impl RustAnalyzerClient {
         }
     }
 
-    /// Handle one drained message: respond to server requests with null, skip notifications.
-    async fn handle_drained_message(&mut self, msg_val: &Value) {
-        let has_result = msg_val.get("result").is_some() || msg_val.get("error").is_some();
-        if !has_result && msg_val.get("id").is_some() {
-            // Server-initiated request (e.g. window/workDoneProgressCreate).
-            let resp = json!({
-                "jsonrpc": "2.0",
-                "id": msg_val.get("id").cloned().unwrap(),
-                "result": Value::Null
-            });
-            self.send_message(&resp).await.ok();
-        }
-    }
-
     async fn initialize(&mut self) -> Result<()> {
         let current_dir = std::env::current_dir()?;
-        // Rust-analyzer can't handle workspaces with "." as a member (virtual
-        // manifest confusion). Instead, discover individual crate dirs from the
-        // workspace Cargo.toml and pass them as separate workspaceFolders.
-        let folders = discover_crate_folders(&current_dir);
-        dbg_log(&format!("discover_crate_folders: CWD={}, found {} folders: {:?}",
-            current_dir.display(), folders.len(),
-            folders.iter().take(5).map(|f| f.to_string()).collect::<Vec<_>>()));
-        let root_uri = if !folders.is_empty() {
-            // Use first crate dir as rootUri; all crates are still accessible via workspaceFolders.
-            format!("file://{}", folders[0])
-        } else {
-            format!("file://{}", current_dir.display())
-        };
-
-        let ws_folders: Vec<Value> = if !folders.is_empty() {
-            folders.iter().map(|p| {
-                let name = std::path::Path::new(p)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("workspace");
-                json!({ "uri": format!("file://{p}"), "name": name })
-            }).collect::<Vec<_>>()
-        } else {
-            let fallback = current_dir.display().to_string();
-            vec![json!({
-                "uri": format!("file://{fallback}"),
-                "name": current_dir.file_name().and_then(|n| n.to_str()).unwrap_or("workspace")
-            })]
-        };
+        // Use CWD as rootUri with no workspaceFolders. RA discovers the
+        // workspace automatically by walking up to find Cargo.toml.
+        // Passing individual crate dirs as workspaceFolders causes RA to walk
+        // up from each and get confused by the virtual manifest with "." member.
+        let root_uri = format!("file://{}", current_dir.display());
+        dbg_log(&format!("initialize: rootUri={root_uri} (no workspaceFolders)"));
 
         let init_params = json!({
             "processId": null,
             "clientInfo": { "name": "rust-mcp-server", "version": "0.1.0" },
             "rootUri": root_uri,
-            "workspaceFolders": ws_folders,
             "capabilities": {
                 "window": { "workDoneProgress": true },
                 "textDocument": {
@@ -352,49 +379,32 @@ impl RustAnalyzerClient {
         .await
     }
 
-    /// Wait up to 10s for a publishDiagnostics notification for the given file,
-    /// draining notifications until one arrives or timeout. This ensures RA has
-    /// finished analyzing the file before we send queries.
+    /// Wait up to 5s for a publishDiagnostics notification, draining notifications
+    /// only. Since indexing is complete (start() drains all progress), diagnostics
+    /// arrive quickly after didOpen. This confirms RA has analyzed the file.
     async fn wait_for_diagnostics(&mut self, abs_path: &str) {
         let target_uri = uri_from_path(abs_path);
-        // Drain pending messages for up to 10s looking for publishDiagnostics
-        // matching our URI. Non-matching notifications are consumed and discarded;
-        // responses (with result/error + id) are left in the channel.
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        // Short timeout — with proper indexing drain in start(), publishDiagnostics
+        // arrives within ~1s of didOpen.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             if tokio::time::Instant::now() >= deadline { return; }
             match self.receiver.as_mut() {
                 Some(rx) => {
                     match tokio::time::timeout_at(deadline, rx.recv()).await {
                         Ok(Some(msg_val)) => {
-                            // Check if this is a publishDiagnostics for our file.
                             let method = msg_val.get("method").and_then(|m| m.as_str());
                             if method == Some("textDocument/publishDiagnostics") {
-                                let uri = msg_val
-                                    .get("params")
-                                    .and_then(|p| p.get("uri"))
-                                    .and_then(|u| u.as_str())
-                                    .unwrap_or("");
-                                // RA may send diagnostics for multiple files; check if ours is included.
-                                if !msg_val
-                                    .get("params")
-                                    .and_then(|p| p.get("diagnostics"))
-                                    .map(|d| d.is_array() && !d.as_array().unwrap().is_empty())
-                                    .unwrap_or(false)
-                                {
-                                    // Empty diagnostics — file analyzed but no issues. Good enough.
-                                    return;
-                                }
-                                if uri == target_uri { return; }
-                            } else if msg_val.get("result").is_some() || msg_val.get("error").is_some() {
-                                // This is a response to our request, not a notification.
-                                // Put it back? Can't put back into unbounded channel easily,
-                                // so handle: re-send won't work. Just consume and discard —
-                                // but this could be the initialize result we're waiting for!
-                                // Actually wait_for_diagnostics is called AFTER did_open which
-                                // is after initialize, so responses here are likely stale.
-                                dbg_log("wait_for_diagnostics: consumed a response (discarding)");
-                            } else if msg_val.get("id").is_some() {
+                                // Any publishDiagnostics (even empty) means the file is analyzed.
+                                dbg_log(&format!("wait_for_diagnostics: got publishDiagnostics for {}",
+                                    msg_val.get("params")
+                                        .and_then(|p| p.get("uri"))
+                                        .and_then(|u| u.as_str())
+                                        .unwrap_or("?")));
+                                return;
+                            } else if !msg_val.get("result").is_some() && !msg_val.get("error").is_some()
+                                && msg_val.get("id").is_some()
+                            {
                                 // Server-initiated request — respond with null.
                                 let resp = json!({
                                     "jsonrpc": "2.0",
@@ -403,6 +413,7 @@ impl RustAnalyzerClient {
                                 });
                                 self.send_message(&resp).await.ok();
                             }
+                            // Skip all other notifications silently (progress, etc.)
                         }
                         _ => return,
                     }
@@ -446,6 +457,13 @@ impl RustAnalyzerClient {
 
     pub async fn workspace_symbols(&mut self, query: &str) -> Result<String> {
         self.ensure_started().await?;
+        
+        // RA needs at least one did_open to trigger file analysis before it
+        // can serve workspace/symbol queries. Open a known source file.
+        let warmup_path = canonicalize("mcp-rlsp/src/main.rs");
+        if std::path::Path::new(&warmup_path).exists() {
+            self.did_open(&warmup_path).await?;
+        }
         
         let params = create_workspace_symbol_params(query);
         let response = self.send_request("workspace/symbol", params).await?;
