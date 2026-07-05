@@ -34,7 +34,12 @@ pub struct App {
     last_tool_call_index: Option<usize>,
     terminal_width: usize,
     pending_messages: Vec<String>,
+    is_busy: bool,
+    spinner_frame: usize,
+    last_spinner_advance: Option<Instant>,
 }
+
+const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 impl App {
     pub fn new(theme: Theme) -> Self {
@@ -49,6 +54,9 @@ impl App {
             last_tool_call_index: None,
             terminal_width: 80,
             pending_messages: Vec::new(),
+            is_busy: false,
+            spinner_frame: 0,
+            last_spinner_advance: None,
         }
     }
 
@@ -78,6 +86,31 @@ impl App {
 
     pub fn set_status(&mut self, status: impl Into<String>) {
         self.status = status.into();
+    }
+
+    /// Advance the spinner frame if busy and ~100ms have elapsed since last advance.
+    pub fn tick_spinner(&mut self) {
+        if !self.is_busy {
+            return;
+        }
+        let now = Instant::now();
+        let due = match self.last_spinner_advance {
+            None => true,
+            Some(t) => now.duration_since(t).as_millis() >= 100,
+        };
+        if due {
+            self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
+            self.last_spinner_advance = Some(now);
+        }
+    }
+
+    /// Status string with spinner prefix when busy.
+    pub fn display_status(&self) -> String {
+        if self.is_busy {
+            format!("{} Working...   {}", SPINNER_FRAMES[self.spinner_frame], self.status)
+        } else {
+            self.status.clone()
+        }
     }
 
     pub fn should_quit(&self) -> bool {
@@ -319,6 +352,19 @@ impl App {
 
     pub fn handle_bus_message(&mut self, msg: &Message) {
         let msg_type = msg.meta_type().unwrap_or_default().to_string();
+
+        // Spinner busy tracking: LlmStream/LlmThinking → busy; LlmStreamEnd → idle
+        match msg_type.as_str() {
+            "LlmStream" | "LlmThinking" => {
+                self.is_busy = true;
+            }
+            "LlmStreamEnd" => {
+                self.is_busy = false;
+                self.spinner_frame = 0;
+                self.last_spinner_advance = None;
+            }
+            _ => {}
+        }
 
         // Filter out noise types
         if matches!(
@@ -586,6 +632,7 @@ impl App {
     }
 
     pub fn render_frame(&self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
+        let status = self.display_status();
         terminal
             .draw(|frame| {
                 self.renderer.render(
@@ -593,7 +640,7 @@ impl App {
                     &self.chat,
                     &self.input,
                     &self.scroll,
-                    &self.status,
+                    &status,
                     &self.pending_messages,
                 );
             })
@@ -674,6 +721,7 @@ pub async fn run_app(
         }
 
         // Render
+        app.tick_spinner();
         app.render_frame(&mut terminal);
 
         // Check for bus messages (non-blocking)
