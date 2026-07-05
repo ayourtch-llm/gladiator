@@ -135,9 +135,10 @@ impl AgentActor {
     }
 
     /// Cross-turn loop breaker: when the agent detects that consecutive turns
-    /// are near-identical, inject a tie-breaker message with a random number.
-    /// The randomness perturbs the context enough to escape the deterministic
-    /// attractor without forcing the model to "admit defeat."
+    /// are near-identical, it (1) collapses the duplicate turns from history
+    /// to remove the attractor, then (2) injects a tie-breaker message with a
+    /// random number. The randomness perturbs the context enough to escape
+    /// the deterministic attractor without forcing the model to "admit defeat."
     async fn maybe_break_cross_turn_loop(
         &self,
         bus: &Bus,
@@ -151,6 +152,16 @@ impl AgentActor {
         if streak < 3 {
             return false;
         }
+
+        // (1) Collapse duplicate turns from history — the accumulated copies
+        // are themselves the attractor. The tie-breaker perturbs the next
+        // turn, but leaving 12 identical reasoning traces in history keeps
+        // pulling the model back.
+        let removed = {
+            let mut s = state.lock().await;
+            s.collapse_loop_turns()
+        };
+
         let roll = {
             use std::collections::hash_map::DefaultHasher;
             use std::hash::{Hash, Hasher};
@@ -163,14 +174,15 @@ impl AgentActor {
             &self.stream_output_topic,
             &self.id(),
             format!(
-                "Cross-turn loop detected: {} consecutive near-identical turns. \
-                 Injecting tie-breaker to perturb the context.",
-                streak
+                "Cross-turn loop detected: {} consecutive near-identical turns \
+                 ({} messages compacted from history). Injecting tie-breaker.",
+                streak, removed,
             ),
         )
         .with_type("Warning");
         let _ = bus.publish(&self.id(), warn).await;
 
+        // (2) Tie-breaker injection.
         let inject = format!(
             "You have repeated the same approach {} times across turns and it is not working. \
              You MUST try a DIFFERENT approach this time — not a minor variation of the same one. \

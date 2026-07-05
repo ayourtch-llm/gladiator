@@ -260,6 +260,104 @@ impl ConversationState {
         hash
     }
 
+    /// Collapse duplicate turn-cycles from the message history.
+    ///
+    /// When `record_turn_and_check_loop` detects a streak of N identical turns,
+    /// this method removes all but the most recent cycle (assistant message +
+    /// its tool results), replacing the removed messages with a single system
+    /// note. This prevents the accumulated duplicates from acting as an
+    /// attractor that keeps pulling the model back into the same loop.
+    ///
+    /// Returns the number of messages removed.
+    pub fn collapse_loop_turns(&mut self) -> usize {
+        if self.recent_turn_hashes.len() < 3 {
+            return 0;
+        }
+        let latest_hash = self.recent_turn_hashes.last().copied().unwrap_or(0);
+
+        // Count trailing identical hashes.
+        let mut dup_count = 0usize;
+        for &h in self.recent_turn_hashes.iter().rev() {
+            if h == latest_hash {
+                dup_count += 1;
+            } else {
+                break;
+            }
+        }
+        if dup_count < 3 {
+            return 0;
+        }
+
+        // Find assistant message indices from the end, matching the trailing
+        // dup_count hashes. We walk messages in reverse, collecting (index, is_assistant).
+        let mut assistant_indices: Vec<usize> = Vec::new();
+        for (i, m) in self.messages.iter().enumerate() {
+            if m.get("role").and_then(|r| r.as_str()) == Some("assistant") {
+                assistant_indices.push(i);
+            }
+        }
+        if assistant_indices.len() < dup_count {
+            return 0; // not enough recorded
+        }
+
+        // The last `dup_count` assistant messages form the loop. Keep the last
+        // one (most recent tool results); remove the earlier dup_count-1 cycles.
+        let keep_idx = *assistant_indices.last().unwrap();
+        // Start removal from the assistant message that's dup_count-1 from the end.
+        let remove_start_assistant = assistant_indices[assistant_indices.len() - dup_count];
+        // Removal range: from remove_start_assistant up to (but not including) keep_idx.
+        // This removes the duplicate assistant messages AND their interleaved tool results,
+        // preserving only the final cycle.
+        let removed_count = keep_idx - remove_start_assistant;
+
+        // Extract a snippet from the removed reasoning for the compaction note.
+        let removed_reasoning = self.messages[remove_start_assistant]
+            .get("reasoning")
+            .and_then(|r| r.as_str())
+            .unwrap_or("");
+        let snippet: String = removed_reasoning.chars().take(300).collect();
+
+        // Perform removal — drop the duplicate cycles.
+        self.messages.drain(remove_start_assistant..keep_idx);
+
+        // Insert a fake user/assistant turn where the removed duplicates were.
+        // This preserves the user/assistant alternation expected by OpenAI-style
+        // chat APIs and gives the model context about what was compacted, so it
+        // doesn't re-derive the same dead-end from scratch.
+        let compaction_note = format!(
+            "[context note: {} duplicate turn-cycles were compacted from history because they \
+             repeated the same approach without progress. Do not re-attempt the same approach. \
+             Compacted reasoning snippet for reference: {:?}]",
+            dup_count - 1,
+            snippet,
+        );
+        self.messages.insert(
+            remove_start_assistant,
+            serde_json::json!({"role": "user", "content": compaction_note.clone()}),
+        );
+        self.messages.insert(
+            remove_start_assistant + 1,
+            serde_json::json!({
+                "role": "assistant",
+                "content": format!(
+                    "Understood — I was stuck repeating myself ({} identical turns). \
+                     I will try a different approach.",
+                    dup_count - 1,
+                ),
+            }),
+        );
+
+        // Reset hash tracking — the streak is broken by the compaction.
+        self.recent_turn_hashes.clear();
+
+        tracing::info!(
+            "[loop-collapse] removed {} messages ({} duplicate turns), inserted compaction turn",
+            removed_count,
+            dup_count - 1,
+        );
+        removed_count
+    }
+
     pub fn add_tool_result(
         &mut self,
         tool_call_id: impl Into<String>,
