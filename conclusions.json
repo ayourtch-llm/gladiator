@@ -214,5 +214,9 @@
   {
     "id": "34545c38-95c5-4174-bb71-e3597b2e30c6",
     "text": "RA returns null for ALL LSP queries on our workspace (find_definition, documentSymbol, hover, workspace/symbol) but WORKS perfectly on a standalone temp project. cargo metadata succeeds with all 11 members found. RA initializes and reports correct capabilities including definitionProvider=true. The indexing progress shows only std library paths, never our source files — meaning RA discovers the project via cargo metadata but fails to load/index any of our actual .rs files. Root cause is NOT: timing (tested up to 120s), rootUri format (file:///path correct), workspaceFolders (added), missing capabilities (all present in init response). The issue appears specific to this workspace structure — possibly the virtual manifest with `\".\"` as a member, or edition=2024 path dependencies. Next step: try creating a minimal reproduction of just one crate from our project in isolation to narrow down what breaks RA."
+  },
+  {
+    "id": "9aab5720-dae3-40c6-b2d3-5ac6a02938ea",
+    "text": "RA null-results investigation: RA returns null for ALL LSP queries (find_definition, documentSymbol, hover, workspace/symbol) on our gladiator workspace but works perfectly on standalone temp projects and minimal workspaces. Added workspaceFolders to initialize params, did_open dedup via HashSet, wait_for_diagnostics after didOpen — committed as 9fe385b. Root cause is project-specific (possibly the virtual manifest with \".\" member + edition=2024 path deps). The three remaining mcp-rlsp fixmes (dec1dfd7 organize_imports, a88584e0 type_hierarchy, 74c02606 extract/inline) are all blocked on this same root cause. Pivoting to other work — the RA investigation needs a different approach like trying rust-project.json or checking if removing \".\" from workspace members fixes it.\""
   }
 ]
