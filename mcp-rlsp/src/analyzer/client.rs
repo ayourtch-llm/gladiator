@@ -474,12 +474,12 @@ impl RustAnalyzerClient {
                     "dynamicRegistration": false,
                     "codeActionLiteralsSupport": true,
                     "dataSupport": false
-                }
+                },
+                "typeHierarchy": { "dynamicRegistration": false }
             },
             "workspace": {
                 "symbol": { "dynamicRegistration": false },
-                "applyEdit": true,
-                "typeHierarchy": { "dynamicRegistration": false }
+                "applyEdit": true
             }
         })
     }
@@ -893,53 +893,144 @@ impl RustAnalyzerClient {
         &mut self, file_path: &str, line: u32, character: u32,
     ) -> Result<String> {
         self.ensure_started().await?;
-        
+
         let abs = canonicalize(file_path);
         self.did_open(&abs).await?;
 
-        // prepareTypeHierarchy returns an array of TypeHierarchyItems; we then request supertypes.
-        let prep_params = prepare_type_hierarchy_params(file_path, line, character);
-        let response = self.send_request_retry("textDocument/prepareTypeHierarchy", prep_params).await?;
-        dbg_log(&format!("get_type_hierarchy: raw prepare response: {response}"));
-        // RA may return null (cursor not on a type) or an array.
-        let result_val = response.get("result").unwrap_or(&Value::Null);
-        if result_val.is_null() {
+        // rust-analyzer doesn't implement textDocument/prepareTypeHierarchy.
+        // Fallback: use hover to identify the symbol at cursor, then
+        // workspace/symbol + implementationProvider to find related types.
+
+        // 1. Hover at position to get type info (name, kind).
+        let hover_params = create_text_document_position_params(file_path, line, character);
+        let hover_resp = self.send_request_retry("textDocument/hover", hover_params).await?;
+        dbg_log(&format!("get_type_hierarchy: raw hover response: {hover_resp}"));
+
+        let hover_result = hover_resp.get("result").unwrap_or(&Value::Null);
+        if hover_result.is_null() {
             self.did_close(&abs).await?;
-            return Ok(format!("No type hierarchy at {file_path}:{line}:{character}"));
+            return Ok(format!("No type hierarchy at {file_path}:{line}:{character} (cursor not on a symbol)"));
         }
-        let items = match result_val.as_array() {
-            Some(arr) => arr,
-            None => {
+
+        // Extract the hovered symbol name from hover markup content.
+        let mut raw_hover = String::new();
+        if let Some(hover_obj) = hover_result.as_object() {
+            if let Some(content_val) = hover_obj.get("contents") {
+                if let Some(s) = content_val.as_str() {
+                    raw_hover = s.to_string();
+                } else if let Some(obj) = content_val.as_object() {
+                    if let Some(val) = obj.get("value").and_then(|v| v.as_str()) {
+                        raw_hover = val.to_string();
+                    }
+                } else if let Some(arr) = content_val.as_array() {
+                    for item in arr {
+                        if let Some(s) = item.as_str() { raw_hover.push_str(s); break; }
+                        if let Some(obj) = item.as_object() {
+                            if let Some(val) = obj.get("value").and_then(|v| v.as_str()) {
+                                raw_hover = val.to_string(); break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Parse the short type name from hover content.
+        let symbol_name = {
+            let mut found = String::new();
+            for line in raw_hover.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("pub struct ") || trimmed.starts_with("struct ") {
+                    let after_kw = if trimmed.starts_with("pub struct ") { &trimmed[12..] }
+                                   else { &trimmed[8..] };
+                    found = after_kw.split(|c: char| !c.is_alphanumeric() && c != '_')
+                        .next().unwrap_or("").to_string();
+                    break;
+                }
+                if trimmed.starts_with("pub enum ") || trimmed.starts_with("enum ") {
+                    let after_kw = if trimmed.starts_with("pub enum ") { &trimmed[9..] }
+                                   else { &trimmed[5..] };
+                    found = after_kw.split(|c: char| !c.is_alphanumeric() && c != '_')
+                        .next().unwrap_or("").to_string();
+                    break;
+                }
+            }
+            // Fallback: last segment of first line (handles "module::path::Type")
+            if found.is_empty() {
+                let first_line = raw_hover.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+                found = first_line.rsplit("::").next().unwrap_or(first_line).trim()
+                    .to_string();
+            }
+            // If it's a primitive like "u64", that's not useful for type hierarchy
+            if found.is_empty() || found.len() <= 2 {
                 self.did_close(&abs).await?;
-                return Ok(format!("No type hierarchy at {file_path}:{line}:{character}"));
+                return Ok(format!("No type hierarchy at {file_path}:{line}:{character} (cursor on '{found}', not a struct/enum/trait)"));
             }
+            found
         };
-        if items.is_empty() {
-            self.did_close(&abs).await?;
-            return Ok(format!("No type hierarchy at {file_path}:{line}:{character}"));
-        }
 
-        // For each prepared item, request supertypes.
-        let mut out = String::new();
-        for item in items.iter().take(5) {
-            let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("");
-            let kind = item.get("kind").and_then(|k| k.as_u64());
-            if let Some(uri) = item.get("uri").and_then(|u| u.as_str()) {
-                out.push_str(&format!("{name} [kind {kind:?}] at {uri}\n"));
-            } else {
-                out.push_str(&format!("{name} [kind {kind:?}]\n"));
+        dbg_log(&format!("get_type_hierarchy: extracted symbol_name={symbol_name}"));
+
+        // 2. Use workspace/symbol to find all matching symbols (structs, traits, impls).
+        let ws_params = create_workspace_symbol_params(&symbol_name);
+        let ws_resp = self.send_request_retry("workspace/symbol", ws_params).await?;
+        dbg_log(&format!("get_type_hierarchy: raw workspace/symbol response length={ws_resp}"));
+
+        let mut out = format!("{symbol_name}\n");
+        if let Some(symbols) = ws_resp.get("result").and_then(|r| r.as_array()) {
+            // Group by symbol kind
+            for sym in symbols.iter().take(20) {
+                let name = sym.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                let kind = sym.get("kind").and_then(|k| k.as_u64());
+                let container = sym.get("containerName").and_then(|c| c.as_str()).unwrap_or("");
+
+                // LSP SymbolKind: 23=Struct, 24=Enum, 25=Operator, 26=TypeParameter,
+                // 5=Class, 6=Function, 11=Constructor, 2=Module
+                let kind_str = match kind {
+                    Some(1) => "File", Some(2) => "Module", Some(3) => "Namespace",
+                    Some(4) => "Package", Some(5) => "Class", Some(6) => "Method/Function",
+                    Some(7) => "Property", Some(8) => "Field", Some(9) => "Enum",
+                    Some(10) => "Interface", Some(11) => "Function", Some(12) => "String",
+                    Some(13) => "Number", Some(14) => "Boolean", Some(15) => "Array",
+                    Some(20) => "TypeParameter", Some(22) => "Struct", Some(23) => "Enum",
+                    _ => "?"
+                };
+
+                if let Some(loc) = sym.get("location") {
+                    let uri = loc.get("uri").and_then(|u| u.as_str()).unwrap_or("");
+                    out.push_str(&format!("  {name} [{kind_str}] in {container} at {uri}\n"));
+                } else {
+                    out.push_str(&format!("  {name} [{kind_str}] in {container}\n"));
+                }
+            }
+
+            // Find impl blocks — these show trait implementations (supertypes)
+            let impls: Vec<&Value> = symbols.iter()
+                .filter(|s| s.get("name").and_then(|n| n.as_str()).unwrap_or("").contains(&symbol_name))
+                .collect();
+            if !impls.is_empty() {
+                out.push_str("\nImplementations:\n");
+                for imp in impls.iter().take(10) {
+                    let name = imp.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                    let container = imp.get("containerName").and_then(|c| c.as_str()).unwrap_or("");
+                    out.push_str(&format!("  {name} (in {container})\n"));
+                }
             }
         }
 
-        // Request supertypes for the first item.
-        if let Some(first) = items.first() {
-            let super_params = supertypes_params(first);
-            let super_resp = self.send_request("typeHierarchy/supertypes", super_params).await?;
-            dbg_log(&format!("get_type_hierarchy: raw supertypes response: {super_resp}"));
-            if let Some(supers) = super_resp.get("result").and_then(|r| r.as_array()) {
-                for s in supers.iter().take(10) {
-                    let name = s.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                    out.push_str(&format!("  supertype: {name}\n"));
+        // 3. Use textDocument/implementation to find implementations of this type.
+        let impl_params = create_text_document_position_params(file_path, line, character);
+        let impl_resp = self.send_request("textDocument/implementation", impl_params).await?;
+        dbg_log(&format!("get_type_hierarchy: raw implementation response: {impl_resp}"));
+        if let Some(impls) = impl_resp.get("result").and_then(|r| r.as_array()) {
+            if !impls.is_empty() {
+                out.push_str("\nImplementations at cursor:\n");
+                for imp in impls.iter().take(10) {
+                    let uri = imp.get("uri").and_then(|u| u.as_str()).unwrap_or("");
+                    if let Some(range) = imp.get("range") {
+                        let start_line = range.get("start").and_then(|s| s.get("line")).and_then(|l| l.as_u64()).unwrap_or(0);
+                        out.push_str(&format!("  {uri}:{start_line}\n"));
+                    }
                 }
             }
         }
