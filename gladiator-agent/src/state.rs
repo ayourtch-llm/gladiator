@@ -460,8 +460,8 @@ impl ConversationState {
         ));
         for line in &out[start..] {
             // Truncate individual messages to keep the file readable.
-            let truncated = if line.len() > 2000 {
-                format!("{}...[truncated]", &line[..2000])
+            let truncated = if line.chars().count() > 2000 {
+                format!("{}...[truncated]", line.chars().take(2000).collect::<String>())
             } else {
                 line.to_string()
             };

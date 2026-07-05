@@ -860,7 +860,8 @@ pub async fn run_app(
                 let msg_type = msg.meta_type().unwrap_or_default().to_string();
                 let payload_preview = msg.payload_str().unwrap_or_default();
                 let preview = if payload_preview.len() > 80 {
-                    format!("{}...", &payload_preview[..80])
+                    let truncated: String = payload_preview.chars().take(80).collect();
+                    format!("{}...", truncated)
                 } else {
                     payload_preview
                 };
