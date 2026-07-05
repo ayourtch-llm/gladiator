@@ -330,29 +330,61 @@ impl RustAnalyzerClient {
             .and_then(|p| p.as_array())
             .ok_or_else(|| anyhow!("no packages in cargo metadata"))?;
 
-        // Identify local workspace members (source is null for path deps).
-        let mut crates: Vec<Value> = Vec::new();
-        let mut name_to_index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-
-        // Collect local packages (source is null for path deps, non-null for crates.io/git)
-        let mut local_pkgs: Vec<&Value> = Vec::new();
-        for pkg in packages {
-            if pkg.get("source").and_then(|s| s.as_str()).unwrap_or("") == "" {
-                local_pkgs.push(pkg);
+        // Build id→index mapping for ALL packages. Cargo package ids are unique
+        // (e.g., "registry+...#name@version" or "path+file:///.../Cargo.toml").
+        let mut id_to_index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for (i, pkg) in packages.iter().enumerate() {
+            if let Some(id) = pkg.get("id").and_then(|v| v.as_str()) {
+                id_to_index.insert(id.to_string(), i);
             }
         }
 
-        // Assign index mapping
-        for (i, pkg) in local_pkgs.iter().enumerate() {
-            let name = pkg["name"].as_str().unwrap_or_default();
-            name_to_index.insert(name.to_string(), i);
+        // Build resolve node map: package_id → resolved dep names + their package ids.
+        // The resolve section handles version deduplication — each node's deps[].pkg
+        // points to the exact resolved package id for that dependency.
+        let mut resolve_deps: std::collections::HashMap<String, Vec<(String, String)>> = std::collections::HashMap::new();
+        if let Some(nodes) = meta.get("resolve").and_then(|r| r.get("nodes")).and_then(|n| n.as_array()) {
+            for node in nodes {
+                let pkg_id = node.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let mut deps_list = Vec::new();
+                if let Some(deps) = node.get("deps").and_then(|d| d.as_array()) {
+                    for dep in deps {
+                        let dep_name = dep.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                        let dep_pkg_id = dep.get("pkg").and_then(|p| p.as_str()).unwrap_or("").to_string();
+                        // Skip dev-deps: check if this dep appears only in dev-dependencies.
+                        // The resolve node includes all deps; we filter by matching against
+                        // the package's own dependency list for kind filtering later.
+                        deps_list.push((dep_name, dep_pkg_id));
+                    }
+                }
+                resolve_deps.insert(pkg_id, deps_list);
+            }
         }
 
-        // Second pass: build crate entries with deps.
-        for pkg in &local_pkgs {
-            let name_val = pkg.get("name").and_then(|n| n.as_str()).unwrap_or("");
-            
-            // Find root_module (prefer lib target, then bin)
+        // Build per-package dev-dep name set to exclude from crate graph.
+        let mut pkg_dev_deps: std::collections::HashMap<String, std::collections::HashSet<String>> = std::collections::HashMap::new();
+        for pkg in packages {
+            if let Some(pkg_id) = pkg.get("id").and_then(|v| v.as_str()) {
+                let mut dev_set = std::collections::HashSet::new();
+                if let Some(deps) = pkg.get("dependencies").and_then(|d| d.as_array()) {
+                    for dep in deps {
+                        if dep.get("kind").and_then(|k| k.as_str()).unwrap_or("") == "dev" {
+                            if let Some(name) = dep.get("name").and_then(|n| n.as_str()) {
+                                dev_set.insert(name.to_string());
+                            }
+                        }
+                    }
+                }
+                pkg_dev_deps.insert(pkg_id.to_string(), dev_set);
+            }
+        }
+
+        let mut crates: Vec<Value> = Vec::new();
+        for pkg in packages {
+            let is_local = pkg.get("source").and_then(|s| s.as_str()).unwrap_or("") == "";
+            let pkg_id = pkg.get("id").and_then(|v| v.as_str()).unwrap_or("");
+
+            // Find root_module (prefer lib target, then first with src_path)
             let targets = pkg.get("targets")
                 .and_then(|t| t.as_array())
                 .cloned()
@@ -370,24 +402,19 @@ impl RustAnalyzerClient {
                 }
             }
 
-            // Build deps list — only local workspace dependencies
+            // Build deps list using resolve nodes for correct version resolution.
             let mut crate_deps: Vec<Value> = Vec::new();
-            if let Some(deps) = pkg.get("dependencies").and_then(|d| d.as_array()) {
-                for dep in deps {
-                    let kind_val = dep.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+            if let Some(resolved) = resolve_deps.get(&pkg_id.to_string()) {
+                let dev_set = pkg_dev_deps.get(&pkg_id.to_string());
+                for (dep_name, dep_pkg_id) in resolved {
                     // Skip dev-dependencies
-                    if !kind_val.is_empty() && kind_val != "normal" { continue; }
-                    
-                    let dep_name = dep.get("name")
-                        .and_then(|n| n.as_str())
-                        .unwrap_or("")
-                        .replace('-', "_");
-                    if let Some(&dep_idx) = name_to_index.get(
-                        &dep.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string()
-                    ) {
+                    if let Some(devs) = dev_set {
+                        if devs.contains(dep_name) { continue; }
+                    }
+                    if let Some(&dep_idx) = id_to_index.get(dep_pkg_id.as_str()) {
                         crate_deps.push(json!({
                             "crate": dep_idx,
-                            "name": dep_name,
+                            "name": dep_name.replace('-', "_"),
                         }));
                     }
                 }
@@ -398,13 +425,17 @@ impl RustAnalyzerClient {
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| "2024".to_string());
 
+            let name_for_display = pkg.get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("")
+                .to_string();
+
             crates.push(json!({
-                "display_name": name_val,
+                "display_name": name_for_display,
                 "root_module": root_module.clone().unwrap_or_default(),
                 "edition": edition_val,
                 "deps": crate_deps,
-                "is_workspace_member": true,
-                "cfg": ["cfg(tarpaulin_include)"],
+                "is_workspace_member": is_local,
             }));
         }
 
@@ -421,8 +452,10 @@ impl RustAnalyzerClient {
             .map_err(|e| anyhow!("writing rust-project.json: {e}"))?;
         
         dbg_log(&format!(
-            "generate_rust_project_json: wrote {} crates to {:?}",
-            local_pkgs.len(),
+            "generate_rust_project_json: wrote {} crates ({} local, {} external) to {:?}",
+            packages.len(),
+            crates.iter().filter(|c| c.get("is_workspace_member").and_then(|v| v.as_bool()).unwrap_or(false)).count(),
+            crates.iter().filter(|c| !c.get("is_workspace_member").and_then(|v| v.as_bool()).unwrap_or(true)).count(),
             project_path
         ));
         
