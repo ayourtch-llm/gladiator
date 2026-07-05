@@ -128,5 +128,15 @@
     "id": "9c26158a-329d-4392-8209-798da6f202da",
     "phrase": "when there are pending messages shown in the TUI, it would be great to be able to \"retract them to edit\" upon pressing of up arrow in the TUI - investigate if that is something doable - press up arrow and retract all of the pending messages as a single one for editing, and clear the pending messages list, and then when done editing, resubmit the message.",
     "done": true
+  },
+  {
+    "id": "a3d12c35-f03d-4c4f-b9f1-bfc0580d29ad",
+    "phrase": "[i] Sending request to LLM... is probably redundant",
+    "done": true
+  },
+  {
+    "id": "9920391b-5946-4c9e-aaa4-c06e06a4b97e",
+    "phrase": "Ctrl-K at the end of the line in the multiline input case should remove the newline after the cursor - that is, append the next line to the current line, after the cursor position - without changing the curos position.",
+    "done": false
   }
 ]

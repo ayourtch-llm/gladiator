@@ -654,14 +654,6 @@ impl Actor for AgentActor {
                                 s.build_messages_with_system(&self.system_message)
                             };
 
-                            // Publish status to TUI
-                            let status_msg = Message::new(
-                                &self.stream_output_topic,
-                                &self.id(),
-                                "Sending request to LLM...",
-                            ).with_type("Info");
-                            let _ = bus.publish(&self.id(), status_msg).await;
-
                             if let Err(e) = self.send_conversation(bus, &messages).await {
                                 error!("Failed to send conversation: {}", e);
                             }
