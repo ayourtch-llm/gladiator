@@ -182,6 +182,22 @@ fn emacs_kill_to_end_of_line_multiline() {
 // --- C-u: kill to start of line --------------------------------------------
 
 #[test]
+fn emacs_kill_to_end_of_line_join_multiline() {
+    let mut input = InputState::new();
+    input.insert_str("line1\nline2");
+    // cursor at 11 -> move left to end of "line1" (pos 5, before '\n')
+    for _ in 0..6 {
+        input.cursor_left();
+    }
+    assert_eq!(input.cursor(), 5);
+    // C-k at newline boundary: kills the \n and joins next line.
+    // Cursor stays put; kill ring records "\n".
+    input.kill_to_end_of_line();
+    assert_eq!(input.buffer(), "line1line2");
+    assert_eq!(input.cursor(), 5); // cursor unchanged
+}
+
+#[test]
 fn emacs_kill_to_start_of_line() {
     let mut input = InputState::new();
     input.insert_str("hello world");

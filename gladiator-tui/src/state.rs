@@ -599,6 +599,11 @@ impl InputState {
         if self.cursor < line_end {
             let killed: String = self.buffer.drain(self.cursor..line_end).collect();
             self.record_kill_forward(&killed);
+        } else if self.cursor < self.buffer.len() && self.buffer[self.cursor..].starts_with('\n') {
+            // At end of a non-final line in multiline input: kill the newline
+            // to join the next line onto this one. Cursor stays put.
+            let killed: String = self.buffer.drain(self.cursor..self.cursor + 1).collect();
+            self.record_kill_forward(&killed);
         } else {
             self.break_kill_chain();
         }

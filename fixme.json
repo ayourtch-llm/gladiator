@@ -137,6 +137,6 @@
   {
     "id": "9920391b-5946-4c9e-aaa4-c06e06a4b97e",
     "phrase": "Ctrl-K at the end of the line in the multiline input case should remove the newline after the cursor - that is, append the next line to the current line, after the cursor position - without changing the curos position.",
-    "done": false
+    "done": true
   }
 ]
