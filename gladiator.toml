@@ -108,3 +108,13 @@ expose = []
 command = ["target/release/mcp-tagged-fileops"]
 default = false
 expose = []
+
+[mcp_servers.mcp-loader]
+command = ["target/release/mcp-loader"]
+default = true
+expose = []
+
+[mcp_servers.mcp-pdf-server]
+command = ["target/release/mcp-pdf-server"]
+default = true
+expose = []
