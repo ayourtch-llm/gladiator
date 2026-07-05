@@ -270,6 +270,67 @@ impl Renderer {
 
         // Tool messages: no wrapping, preserve exact whitespace, apply h_offset
         if msg.role == AppMessageRole::Tool {
+            // Diff-rendered tool calls (edit_file / plan_edits) are shown in
+            // full with color — never collapsed.
+            let is_diff = msg.content.contains('\n')
+                && {
+                    let first_line = msg.content.split('\n').next().unwrap_or("");
+                    matches!(
+                        first_line,
+                        "edit_file" | "apply_edits" | "plan_edits"
+                    )
+                };
+
+            if is_diff {
+                let all_lines: Vec<&str> = msg.content.split('\n').collect();
+                let mut lines: Vec<Line> = Vec::new();
+
+                for (i, raw_line) in all_lines.iter().enumerate() {
+                    // First line is the tool name — render with [tool] prefix.
+                    if i == 0 && !prefix_str.is_empty() {
+                        lines.push(Line::from(vec![
+                            Span::styled(prefix_str.clone(), Style::default().fg(prefix_color)),
+                            Span::styled(raw_line.to_string(), Style::default().fg(self.theme.color_info())),
+                        ]));
+                        continue;
+                    }
+
+                    let line_color = if raw_line.starts_with("--- ") || raw_line.starts_with("+++ ") {
+                        self.theme.color_text_muted()
+                    } else if raw_line.starts_with("@@") {
+                        self.theme.color_accent()
+                    } else if raw_line.starts_with('+') {
+                        self.theme.color_success()
+                    } else if raw_line.starts_with('-') {
+                        self.theme.color_error()
+                    } else if raw_line.starts_with('#') {
+                        // Description comment from plan_edits
+                        self.theme.color_text_muted()
+                    } else {
+                        text_color
+                    };
+
+                    let avail = width.max(1);
+                    let chars: Vec<char> = raw_line.chars().collect();
+                    let start = h_offset.min(chars.len());
+                    let end = (start + avail).min(chars.len());
+                    let text: String = chars[start..end].iter().collect();
+
+                    lines.push(Line::from(vec![Span::styled(
+                        text,
+                        Style::default().fg(line_color),
+                    )]));
+                }
+
+                if lines.is_empty() {
+                    lines.push(Line::from(vec![Span::styled(
+                        prefix_str,
+                        Style::default().fg(prefix_color),
+                    )]));
+                }
+                return lines;
+            }
+
             // Collapse long tool results: first N lines + ellipsis hint.
             // bash gets a larger budget (10), other tools get 3.
             let is_bash = msg.content.starts_with("[bash]");
