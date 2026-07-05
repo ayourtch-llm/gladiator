@@ -89,10 +89,10 @@ impl Tool for McpTool {
             task: None,
         };
 
-        debug!("[mcp-tool] calling peer.call_tool with 10s timeout...");
+        debug!("[mcp-tool] calling peer.call_tool with 30s timeout...");
         debug!("[mcp-tool] peer info: {:?}", peer.peer_info());
         let result = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(30),
             peer.call_tool(call_params)
         ).await;
         debug!("[mcp-tool] call_tool result: {:?}", result.is_ok());

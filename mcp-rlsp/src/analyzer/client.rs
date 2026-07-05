@@ -1,10 +1,14 @@
 use anyhow::{anyhow, Result};
 use serde_json::{Value, json};
 use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Child;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 
 use crate::analyzer::protocol::*;
+
+/// Debug log to stderr.
+fn dbg_log(msg: &str) {
+    eprintln!("[mcp-rlsp debug] {msg}");
+}
 
 fn get_rust_analyzer_path() -> String {
     std::env::var("RUST_ANALYZER_PATH").unwrap_or_else(|_| {
@@ -14,29 +18,112 @@ fn get_rust_analyzer_path() -> String {
 }
 
 pub struct RustAnalyzerClient {
-    process: Option<Child>,
     request_id: u64,
     initialized: bool,
+    /// Send serialized JSON-RPC messages to the IO task for writing to RA's stdin.
+    sender: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    /// Receive responses and server-initiated requests from the IO task reading RA's stdout.
+    receiver: Option<tokio::sync::mpsc::UnboundedReceiver<Value>>,
 }
 
 impl Default for RustAnalyzerClient {
     fn default() -> Self { Self::new() }
 }
 
-impl RustAnalyzerClient {
-    pub fn new() -> Self {
-        Self { process: None, request_id: 0, initialized: false }
+impl Drop for RustAnalyzerClient {
+    fn drop(&mut self) {
+        // Dropping sender signals the IO task to exit.
+        let _ = self.sender.take();
+    }
+}
+
+/// Read one LSP message (headers + body) from a buffered reader.
+async fn read_one_message<R: AsyncBufReadExt + Unpin>(reader: &mut R) -> Result<Value> {
+    let mut content_length: Option<usize> = None;
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line).await?;
+        if line == "\r\n" || line.is_empty() { break; }
+        if let Some(stripped) = line.strip_prefix("Content-Length:") {
+            content_length = stripped.trim().parse::<usize>().ok();
+        }
     }
 
-    /// Spawn rust-analyzer and send the initialize handshake.
+    let length = content_length.ok_or_else(|| anyhow!("missing Content-Length header"))?;
+    let mut buf = vec![0u8; length];
+    reader.read_exact(&mut buf).await?;
+    Ok(serde_json::from_slice(&buf)?)
+}
+
+impl RustAnalyzerClient {
+    pub fn new() -> Self {
+        Self { request_id: 0, initialized: false, sender: None, receiver: None }
+    }
+
+    /// Lazy initialization — call start() if not yet initialized.
+    pub async fn ensure_started(&mut self) -> Result<()> {
+        if !self.initialized {
+            self.start().await?;
+        }
+        Ok(())
+    }
+
+    /// Spawn rust-analyzer and start the IO task.
     pub async fn start(&mut self) -> Result<()> {
         let path = get_rust_analyzer_path();
-        let child = tokio::process::Command::new(&path)
+        let mut child = tokio::process::Command::new(&path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()?;
-        self.process = Some(child);
+
+        let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
+        let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
+
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (in_tx, in_rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+
+        // IO task: owns stdin and stdout. Reads from stdout continuously,
+        // writes to stdin when messages arrive on out_rx.
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let mut reader = tokio::io::BufReader::new(stdout);
+            let mut writer = stdin;
+
+            loop {
+                tokio::select! {
+                    biased;
+                    msg = out_rx.recv() => {
+                        match msg {
+                            Some(json_str) => {
+                                let header = format!("Content-Length: {}\r\n\r\n", json_str.len());
+                                if writer.write_all(header.as_bytes()).await.is_ok()
+                                    && writer.write_all(json_str.as_bytes()).await.is_ok()
+                                {
+                                    let _ = writer.flush().await;
+                                } else { break; }
+                            }
+                            None => break,
+                        }
+                    }
+                    result = read_one_message(&mut reader) => {
+                        match result {
+                            Ok(msg_val) => {
+                                if !in_tx.send(msg_val).is_ok() { break; }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                }
+            }
+
+            let _ = child.wait().await;
+        });
+
+        self.sender = Some(out_tx);
+        self.receiver = Some(in_rx);
+
+        // Child handle is owned by the IO task (moved into closure).
         self.initialize().await?;
         Ok(())
     }
@@ -50,6 +137,7 @@ impl RustAnalyzerClient {
             "clientInfo": { "name": "rust-mcp-server", "version": "0.1.0" },
             "rootUri": root_uri,
             "capabilities": {
+                "window": { "workDoneProgress": true },
                 "textDocument": {
                     "synchronization": { "didOpen": true, "didChange": false, "willSave": false, "save": false },
                     "definition": { "dynamicRegistration": false },
@@ -72,7 +160,86 @@ impl RustAnalyzerClient {
         let _response = self.send_request("initialize", init_params).await?;
         self.send_notification("initialized", json!({})).await?;
         self.initialized = true;
+        // Don't block on project indexing — RA queues LSP requests during indexing
+        // and responds once ready. read_response() handles interleaved notifications.
         Ok(())
+    }
+
+    /// After initialized notification, wait for rust-analyzer to finish initial
+    /// project indexing. RA sends window/workDoneProgressCreate requests (which we
+    /// must respond to), followed by $/progress notifications with begin/end events.
+    /// We track active progress tokens and return once all have ended AND the channel
+    /// is quiet. Falls back to timeout after 60s.
+    #[allow(dead_code)]
+    async fn wait_for_project_index(&mut self) {
+        let mut active_progress: u32 = 0;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+        let mut got_any_message = false;
+
+        loop {
+            if std::time::Instant::now() >= deadline {
+                dbg_log("wait_for_project_index: timed out after 90s, proceeding anyway");
+                return;
+            }
+            // Blocking recv with short timeout — catches messages as they arrive.
+            let msg_val = match self.receiver.as_mut() {
+                Some(rx) => {
+                    match tokio::time::timeout(
+                        std::time::Duration::from_millis(500), rx.recv()).await {
+                        Ok(Some(v)) => v,
+                        _ => {
+                            // Channel empty or timed out.
+                            if active_progress == 0 && got_any_message {
+                                dbg_log("wait_for_project_index: channel idle, no active progress — done");
+                                return;
+                            }
+                            continue; // keep waiting
+                        }
+                    }
+                }
+                None => return,
+            };
+            got_any_message = true;
+
+            let has_result = msg_val.get("result").is_some() || msg_val.get("error").is_some();
+            if !has_result && msg_val.get("id").is_some() {
+                // Server-initiated request (e.g. window/workDoneProgressCreate)
+                if let Some(method) = msg_val.get("method").and_then(|m| m.as_str()) {
+                    dbg_log(&format!("wait_for_project_index: handling server request '{method}'"));
+                    if method == "window/workDoneProgressCreate" {
+                        active_progress += 1;
+                    }
+                    let resp = json!({
+                        "jsonrpc": "2.0",
+                        "id": msg_val.get("id").cloned().unwrap(),
+                        "result": Value::Null
+                    });
+                    self.send_message(&resp).await.ok();
+                }
+            } else if !has_result && msg_val.get("method").is_some() {
+                let method = msg_val.get("method").and_then(|m| m.as_str()).unwrap_or("");
+                dbg_log(&format!("wait_for_project_index: notification '{method}'"));
+                if method == "$/progress" {
+                    if let Some(kind) = msg_val.get("params")
+                        .and_then(|p| p.get("value"))
+                        .and_then(|v| v.as_object())
+                        .and_then(|o| o.get("kind"))
+                        .and_then(|k| k.as_str()) {
+                        match kind {
+                            "begin" => { active_progress += 1; }
+                            "end"   => {
+                                if active_progress > 0 { active_progress -= 1; }
+                                dbg_log(&format!("wait_for_project_index: progress end, active now {active_progress}"));
+                            }
+                            _       => {}
+                        }
+                    }
+                } else if method == "textDocument/publishDiagnostics" {
+                    // Diagnostics for a file — indexing is progressing.
+                    dbg_log("wait_for_project_index: got publishDiagnostics");
+                }
+            }
+        }
     }
 
     async fn send_notification(&mut self, method: &str, params: Value) -> Result<()> {
@@ -84,7 +251,7 @@ impl RustAnalyzerClient {
         self.send_message(&msg).await
     }
 
-    /// Send a request and read the matching response (skipping any notifications).
+    /// Send a request and read the matching response (handling server requests/notifications).
     async fn send_request(&mut self, method: &str, params: Value) -> Result<Value> {
         self.request_id += 1;
         let id = self.request_id;
@@ -102,36 +269,47 @@ impl RustAnalyzerClient {
 
     async fn send_message(&mut self, message: &Value) -> Result<()> {
         let content = message.to_string();
-        let header = format!("Content-Length: {}\r\n\r\n", content.len());
-
-        if let Some(child) = &mut self.process {
-            if let Some(stdin) = child.stdin.as_mut() {
-                stdin.write_all(header.as_bytes()).await?;
-                stdin.write_all(content.as_bytes()).await?;
-                stdin.flush().await?;
-            }
+        if let Some(tx) = &self.sender {
+            tx.send(content).map_err(|_| anyhow!("IO task closed"))?;
+        } else {
+            return Err(anyhow!("no sender"));
         }
-
         Ok(())
     }
 
-    /// Read stdout until we find the JSON-RPC response with `expected_id`.
-    /// Notifications emitted by rust-analyzer (e.g. publishDiagnostics) are skipped.
+    /// Read from the channel until we find a response with `expected_id`.
+    /// Server-initiated requests (e.g. window/workDoneProgressCreate) are
+    /// responded to automatically; notifications are logged and skipped.
     async fn read_response(&mut self, expected_id: u64) -> Result<Value> {
-        if let Some(child) = &mut self.process {
-            if let Some(stdout) = child.stdout.as_mut() {
-                let mut reader = BufReader::new(stdout);
-                loop {
-                    let msg_val = read_one_message(&mut reader).await?;
-                    // Is this our response?
-                    if msg_val.get("id").and_then(|v| v.as_u64()) == Some(expected_id) {
-                        return Ok(msg_val);
-                    }
-                    // Otherwise it's a notification or someone else's response; skip.
+        loop {
+            // Receive one message — borrow receiver only for the recv call.
+            let msg_val = {
+                let rx = self.receiver.as_mut().ok_or_else(|| anyhow!("no receiver"))?;
+                rx.recv().await.ok_or_else(|| anyhow!("IO task closed"))?
+            };
+
+            // Is this our response? Must have matching id AND result/error.
+            let has_result = msg_val.get("result").is_some() || msg_val.get("error").is_some();
+            if has_result && msg_val.get("id").and_then(|v| v.as_u64()) == Some(expected_id) {
+                return Ok(msg_val);
+            }
+            if !has_result && msg_val.get("id").is_some() {
+                if let Some(method) = msg_val.get("method").and_then(|m| m.as_str()) {
+                    dbg_log(&format!("read_response: handling server request '{method}'"));
+                    // Respond with null result to acknowledge.
+                    let resp = json!({
+                        "jsonrpc": "2.0",
+                        "id": msg_val.get("id").cloned().unwrap(),
+                        "result": Value::Null
+                    });
+                    self.send_message(&resp).await?;
                 }
+            } else if !has_result && msg_val.get("method").is_some() {
+                // Notification (no id) — e.g. $/progress, publishDiagnostics.
+                let method = msg_val.get("method").and_then(|m| m.as_str()).unwrap_or("");
+                dbg_log(&format!("read_response: skipping notification '{method}'"));
             }
         }
-        Err(anyhow!("Failed to read response: no process/stdout"))
     }
 
     // ---- LSP lifecycle helpers ---------------------------------------------
@@ -169,24 +347,83 @@ impl RustAnalyzerClient {
         .await
     }
 
+    /// After did_open, wait for RA to emit publishDiagnostics for the file,
+    /// indicating it has finished analyzing. Blocks up to 10s.
+    async fn wait_for_diagnostics(&mut self) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if std::time::Instant::now() >= deadline {
+                dbg_log("wait_for_diagnostics: timed out after 10s");
+                return;
+            }
+            match self.receiver.as_mut() {
+                Some(rx) => {
+                    match tokio::time::timeout(
+                        std::time::Duration::from_millis(500), rx.recv()).await {
+                        Ok(Some(msg_val)) => {
+                            let has_result = msg_val.get("result").is_some()
+                                || msg_val.get("error").is_some();
+                            if !has_result && msg_val.get("id").is_some() {
+                                // Server-initiated request — respond with null.
+                                if let Some(method) = msg_val.get("method")
+                                    .and_then(|m| m.as_str()) {
+                                    dbg_log(&format!("wait_for_diagnostics: server req '{method}'"));
+                                    let resp = json!({
+                                        "jsonrpc": "2.0",
+                                        "id": msg_val.get("id").cloned().unwrap(),
+                                        "result": Value::Null
+                                    });
+                                    self.send_message(&resp).await.ok();
+                                }
+                            } else if !has_result && msg_val.get("method").is_some() {
+                                let method = msg_val.get("method")
+                                    .and_then(|m| m.as_str()).unwrap_or("");
+                                dbg_log(&format!("wait_for_diagnostics: notification '{method}'"));
+                                if method == "textDocument/publishDiagnostics" { return; }
+                            }
+                        }
+                        _ => continue,
+                    }
+                }
+                None => return,
+            }
+        }
+    }
+
     // ---- Tool implementation methods ---------------------------------------
 
     pub async fn find_definition(&mut self, file_path: &str, line: u32, character: u32) -> Result<String> {
-        if !self.initialized { return Err(anyhow!("Client not initialized")); }
+        self.ensure_started().await?;
+        
+        let abs = canonicalize(file_path);
+        dbg_log(&format!("find_definition: file={file_path} abs={abs} line={line} char={character}"));
+        // Open the doc so RA can resolve cross-file definitions.
+        self.did_open(&abs).await?;
+        self.wait_for_diagnostics().await;
         let params = create_text_document_position_params(file_path, line, character);
+        dbg_log(&format!("find_definition: sending textDocument/definition with params={params}"));
         let response = self.send_request("textDocument/definition", params).await?;
+        dbg_log(&format!("find_definition: raw response: {response}"));
+        self.did_close(&abs).await?;
         Ok(format_definition_response(&response))
     }
 
     pub async fn find_references(&mut self, file_path: &str, line: u32, character: u32) -> Result<String> {
-        if !self.initialized { return Err(anyhow!("Client not initialized")); }
+        self.ensure_started().await?;
+        
+        let abs = canonicalize(file_path);
+        // Open the doc so RA can resolve references (including cross-file).
+        self.did_open(&abs).await?;
+        self.wait_for_diagnostics().await;
         let params = create_references_params(file_path, line, character);
         let response = self.send_request("textDocument/references", params).await?;
+        self.did_close(&abs).await?;
         Ok(format_references_response(&response))
     }
 
     pub async fn workspace_symbols(&mut self, query: &str) -> Result<String> {
-        if !self.initialized { return Err(anyhow!("Client not initialized")); }
+        self.ensure_started().await?;
+        
         let params = create_workspace_symbol_params(query);
         let response = self.send_request("workspace/symbol", params).await?;
         Ok(format_workspace_symbols_response(&response))
@@ -195,7 +432,8 @@ impl RustAnalyzerClient {
     pub async fn rename_symbol(
         &mut self, file_path: &str, line: u32, character: u32, new_name: &str,
     ) -> Result<String> {
-        if !self.initialized { return Err(anyhow!("Client not initialized")); }
+        self.ensure_started().await?;
+        
         let params = create_rename_params(file_path, line, character, new_name);
         let response = self.send_request("textDocument/rename", params).await?;
         apply_workspace_edit(&response)?;
@@ -203,10 +441,12 @@ impl RustAnalyzerClient {
     }
 
     pub async fn get_diagnostics(&mut self, file_path: &str) -> Result<String> {
-        if !self.initialized { return Err(anyhow!("Client not initialized")); }
+        self.ensure_started().await?;
+        
         let abs = canonicalize(file_path);
         // Open the doc so rust-analyzer indexes it and emits publishDiagnostics.
         self.did_open(&abs).await?;
+        self.wait_for_diagnostics().await;
         // Force a round-trip: send a no-op definition request at (0,0) to flush
         // pending diagnostics notifications from the server's queue. We discard them;
         // for richer output use `cargo check` via bash.
@@ -224,9 +464,11 @@ impl RustAnalyzerClient {
         end_line: u32, end_character: u32,
         function_name: &str,
     ) -> Result<String> {
-        if !self.initialized { return Err(anyhow!("Client not initialized")); }
+        self.ensure_started().await?;
+        
         let abs = canonicalize(file_path);
         self.did_open(&abs).await?;
+        self.wait_for_diagnostics().await;
 
         // LSP positions are 0-based; tool args may be either. We pass them through as-is.
         let range = create_range(start_line, start_character, end_line, end_character);
@@ -237,6 +479,7 @@ impl RustAnalyzerClient {
         );
 
         let response = self.send_request("textDocument/codeAction", params).await?;
+        dbg_log(&format!("extract_function: raw codeAction response: {response}"));
         let action = pick_first_command(&response)
             .ok_or_else(|| anyhow!("No extract function code action available for the given range"))?;
 
@@ -251,14 +494,17 @@ impl RustAnalyzerClient {
     pub async fn inline_function(
         &mut self, file_path: &str, line: u32, character: u32,
     ) -> Result<String> {
-        if !self.initialized { return Err(anyhow!("Client not initialized")); }
+        self.ensure_started().await?;
+        
         let abs = canonicalize(file_path);
         self.did_open(&abs).await?;
+        self.wait_for_diagnostics().await;
 
         // Zero-length range at the call site; rust-analyzer matches refactor.inline
         // when the cursor is on a function call.
         let params = create_code_action_position_params(file_path, line, character);
         let response = self.send_request("textDocument/codeAction", params).await?;
+        dbg_log(&format!("inline_function: raw codeAction response: {response}"));
         let action = pick_first_command(&response)
             .ok_or_else(|| anyhow!("No inline code action available at the given position"))?;
 
@@ -269,16 +515,25 @@ impl RustAnalyzerClient {
     }
 
     pub async fn organize_imports(&mut self, file_path: &str) -> Result<String> {
-        if !self.initialized { return Err(anyhow!("Client not initialized")); }
+        self.ensure_started().await?;
+        
         let abs = canonicalize(file_path);
         self.did_open(&abs).await?;
+        self.wait_for_diagnostics().await;
 
-        // Full-document range.
+        // Full-document range. End character must be a valid UTF-16 offset,
+        // not u32::MAX (which RA rejects as out-of-bounds).
         let content = std::fs::read_to_string(file_path)
             .map_err(|e| anyhow!("reading {file_path}: {e}"))?;
         let line_count = content.lines().count() as u32;
-        let full_range = create_range(0, 0, line_count.saturating_sub(1), u32::MAX);
+        let last_line = line_count.saturating_sub(1);
+        // Compute the actual char length of the last line.
+        let last_line_len = content.lines().last().map(|l| l.chars().count()).unwrap_or(0) as u32;
+        dbg_log(&format!("organize_imports: file={file_path} lines={line_count} last_line={last_line} last_len={last_line_len}"));
+        let full_range = create_range(0, 0, last_line, last_line_len);
 
+        // First try with source.organizeImports; if empty, retry without "only"
+        // filter so we can inspect what RA returns.
         let params = create_code_action_params(
             file_path,
             full_range.clone(),
@@ -286,7 +541,21 @@ impl RustAnalyzerClient {
         );
 
         let response = self.send_request("textDocument/codeAction", params).await?;
-        let action = pick_first_command(&response)
+        dbg_log(&format!("organize_imports (filtered) raw: {response}"));
+        let action = pick_first_command(&response);
+
+        // If filtered request returned nothing, try unfiltered and log.
+        let action = match action {
+            Some(a) => Some(a),
+            None => {
+                let params2 = create_code_action_params(file_path, full_range.clone(), &[]);
+                let response2 = self.send_request("textDocument/codeAction", params2).await?;
+                dbg_log(&format!("organize_imports (unfiltered) raw: {response2}"));
+                pick_first_command_with_kind(&response2, "source.organizeImports")
+            }
+        };
+
+        let action = action
             .ok_or_else(|| anyhow!("No organize-imports code action available"))?;
 
         execute_code_action(self, &action).await?;
@@ -298,19 +567,31 @@ impl RustAnalyzerClient {
     pub async fn get_type_hierarchy(
         &mut self, file_path: &str, line: u32, character: u32,
     ) -> Result<String> {
-        if !self.initialized { return Err(anyhow!("Client not initialized")); }
+        self.ensure_started().await?;
+        
         let abs = canonicalize(file_path);
         self.did_open(&abs).await?;
+        self.wait_for_diagnostics().await;
 
         // prepareTypeHierarchy returns an array of TypeHierarchyItems; we then request supertypes.
         let prep_params = prepare_type_hierarchy_params(file_path, line, character);
         let response = self.send_request("textDocument/prepareTypeHierarchy", prep_params).await?;
-        let items = response.get("result").and_then(|r| r.as_array());
-        if items.is_none() {
+        dbg_log(&format!("get_type_hierarchy: raw prepare response: {response}"));
+        // RA may return null (cursor not on a type) or an array.
+        let result_val = response.get("result").unwrap_or(&Value::Null);
+        if result_val.is_null() {
+            self.did_close(&abs).await?;
             return Ok(format!("No type hierarchy at {file_path}:{line}:{character}"));
         }
-        let items = items.unwrap();
+        let items = match result_val.as_array() {
+            Some(arr) => arr,
+            None => {
+                self.did_close(&abs).await?;
+                return Ok(format!("No type hierarchy at {file_path}:{line}:{character}"));
+            }
+        };
         if items.is_empty() {
+            self.did_close(&abs).await?;
             return Ok(format!("No type hierarchy at {file_path}:{line}:{character}"));
         }
 
@@ -330,6 +611,7 @@ impl RustAnalyzerClient {
         if let Some(first) = items.first() {
             let super_params = supertypes_params(first);
             let super_resp = self.send_request("typeHierarchy/supertypes", super_params).await?;
+            dbg_log(&format!("get_type_hierarchy: raw supertypes response: {super_resp}"));
             if let Some(supers) = super_resp.get("result").and_then(|r| r.as_array()) {
                 for s in supers.iter().take(10) {
                     let name = s.get("name").and_then(|n| n.as_str()).unwrap_or("");
@@ -363,30 +645,25 @@ async fn execute_code_action(client: &mut RustAnalyzerClient, action: &Value) ->
     Ok(())
 }
 
-async fn read_one_message(reader: &mut BufReader<&mut tokio::process::ChildStdout>) -> Result<Value> {
-    // Read headers until blank line.
-    let mut content_length: Option<usize> = None;
-    loop {
-        let mut line = String::new();
-        reader.read_line(&mut line).await?;
-        if line == "\r\n" || line.is_empty() { break; }
-        if let Some(stripped) = line.strip_prefix("Content-Length:") {
-            content_length = stripped.trim().parse::<usize>().ok();
-        }
-    }
-
-    let length = content_length.ok_or_else(|| anyhow!("missing Content-Length header"))?;
-    let mut buf = vec![0u8; length];
-    reader.read_exact(&mut buf).await?;
-    Ok(serde_json::from_slice(&buf)?)
-}
-
 /// Pick the first code action that has a command or edit.
 fn pick_first_command(response: &Value) -> Option<Value> {
     // Response is either null, an array of CodeAction objects, or an array of Command objects.
     let arr = response.get("result").and_then(|r| r.as_array()).or_else(|| response.as_array())?;
     for item in arr.iter() {
         if item.get("command").is_some() || item.get("edit").is_some() { return Some(item.clone()); }
+    }
+    None
+}
+
+/// Pick the first code action whose kind matches `kind`.
+fn pick_first_command_with_kind(response: &Value, kind: &str) -> Option<Value> {
+    let arr = response.get("result").and_then(|r| r.as_array()).or_else(|| response.as_array())?;
+    for item in arr.iter() {
+        if item.get("kind").and_then(|k| k.as_str()) == Some(kind)
+            && (item.get("command").is_some() || item.get("edit").is_some())
+        {
+            return Some(item.clone());
+        }
     }
     None
 }

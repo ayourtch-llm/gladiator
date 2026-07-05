@@ -122,5 +122,69 @@
   {
     "id": "957e9449-a729-4765-b326-45bb985b4253",
     "text": "Fixme 9c26158a: \"retract pending messages to edit on Up arrow\". Pending messages are stored in App.pending_messages (Vec<String>), displayed above editor. Agent buffers them via UserMessageQueued events when busy, drains via advance_turn_if_resolved after tool calls complete. To implement retract-to-edit: on Up key press with non-empty pending_messages and empty input buffer, join all pending into one string separated by newlines, load into InputState.buffer, clear pending_messages list. No agent-side change needed — just TUI handle_key + a method to set the input buffer from a string (InputState.set_buffer). Need: add set_buffer() to InputState, modify Up handler in app.rs to check pending_messages first."
+  },
+  {
+    "id": "c221b8a4-56e7-4519-941a-69cab85665dc",
+    "text": "Fixme 9c26158a done. Retract-pending-to-edit feature: TUI sends \"retrieve_pending\" on agent's existing state_control_topic (same channel as dump_state/load_state). Agent drains ConversationState.pending_messages, joins with newlines, publishes RetrievedPending back. TUI loads into InputState via set_buffer(). Up arrow triggers only when pending non-empty + input empty. Committed 864ec58 on orefactor. All workspace tests pass."
+  },
+  {
+    "id": "caf4eb57-79cd-4ea1-89ea-99cbde677c6b",
+    "text": "Fixme a3d12c35: Removed the \"Sending request to LLM...\" Info publish at gladiator-agent/src/actor.rs:661 — it was redundant with send_conversation's own LlmRequestSent event which already drives the TUI spinner. Both call-sites (line ~665 and line ~331) now rely solely on LlmRequestSent for prefill/spinner display. Committed as c3e2ffc on orefactor branch."
+  },
+  {
+    "id": "6ecf9509-2ba5-4319-a3b1-50013e54b8f4",
+    "text": "Fixme 9920391b: Ctrl-K (kill_to_end_of_line) now handles the newline-boundary case in multiline input. When cursor is at end of a line that has a '\\n' after it, C-k kills the \\n and joins next line onto current — without moving cursor. Matches Emacs kill-line semantics. Committed 17d213e on orefactor branch."
+  },
+  {
+    "id": "0f6cc1a6-99d8-4725-8790-769b3279cf6f",
+    "text": "Vendored ../rust-mcp as `mcp-rlsp` workspace member (MIT, author Dex). Renamed crate from rustmcp→mcp_rlsp. Updated Cargo.toml workspace + gladiator.toml MCP config to use target/debug/mcp-rlsp binary. Builds clean, all tests pass. Committed 2387023 on main branch."
+  },
+  {
+    "id": "c116159e-cd0f-4dbd-97f8-6ccde586c923",
+    "text": "mcp-rlsp vendored and tested. Integration tests (4) pass: get_info capabilities, all 9 tools listed correctly, unknown tool + missing params return errors. gladiator.toml points to target/release/mcp-rlsp binary. Release build at /Users/ayourtch/rust/gladiator/target/release/mcp-rlsp ready for use when user restarts gladiator."
+  },
+  {
+    "id": "caf9c024-5710-49c6-a0e9-b95a7e7ef2c2",
+    "text": "Exercised mcp-rlsp LSP tools against own repo. workspace_symbols + find_references work well; find_definition is partial (fails on use-site→def-in-other-file cases); get_type_hierarchy and organize_imports are broken (\"No type hierarchy\" / \"No code action available\"). CRITICAL: rename_symbol corrupts source via naive substring replacement instead of LSP syntactic edits — it mangled comments/declarations in main.rs while leaving real references unchanged. Reverted with git checkout."
+  },
+  {
+    "id": "293dcfbf-4854-4735-acd4-b3a125fa980f",
+    "text": "Fixed critical rename_symbol corruption bug in mcp-rlsp/src/analyzer/client.rs. Root cause: pos_to_index had off-by-one (used line_starts[line-1] instead of line_starts[line]) AND wrong EOL clamp (clamped to start-of-line not end). Replaced with direct lookup: idx=line_starts.get(line), eol=next_line_start-1 or chars_len. Added 3 unit tests + 1 end-to-end test simulating RA WorkspaceEdit JSON for renaming rust_server→server across 3 occurrences in main.rs content — all pass, comments untouched. All 8 mcp-rlsp tests green. Note: live MCP server process (PID 77524) still runs old binary; cannot restart without restarting gladiator itself. Fix verified via unit/integration tests instead."
+  },
+  {
+    "id": "36acf897-1d82-4da9-8da2-68735aa2ce79",
+    "text": "Designing MCP server robustness + admin tools in gladiator-tools/src/mcp.rs. Plan: (1) New McpServerManager holds Arc-shared state per server including peer (ArcSwap for hot-swap), config, status enum {Running/Disabled/Crashed}, retry count. (2) Supervisor task monitors service_handle; on death, exponential backoff respawn (base 500ms × 2^n capped at 30s); after 10 retries → Disabled. (3) Three admin tools: mcp_status (list servers+state), mcp_restart (force respawn by name), mcp_disable (mark disabled + abort child). All exposed as regular Tool impl so agent can call them like any other tool. Existing McpServerRunner::spawn stays for initial boot; manager wraps it with lifecycle management."
+  },
+  {
+    "id": "8d2aa0cd-fc0c-4520-94d7-6de1741f8e31",
+    "text": "Implemented MCP server robustness + admin tools in gladiator-tools/src/mcp_admin.rs (committed as feat(mcp-admin)). McpManager::spawn_all replaces old spawn_mcp_servers. Per-server state with hot-swappable peer slot, stderr ring buffer w/ timestamps via chrono, supervisor task polling 5s with exponential backoff respawn (500ms base ×2^n cap 30s), after MAX_RETRIES=10 → Disabled + exit. Three admin tools registered: mcp_status, mcp_restart, mcp_disable. Full workspace builds clean; all existing gladiator-tools tests pass. Next: rebuild release binary of both gladiator and mcp-rlsp, restart gladiator to load new McpManager, then test by killing mcp-rlsp child + calling tool (should auto-respawn) and using mcp_restart/mcp_disable admin tools."
+  },
+  {
+    "id": "0baba416-dc24-4863-94ae-faf856522805",
+    "text": "MCP robustness + admin tools committed (commit 45cc621). Release binaries built for both gladiator and mcp-rlsp. Next steps after restart: (1) verify new McpManager loaded by calling mcp_status tool; (2) kill mcp-rlsp child PID, call an LSP tool → supervisor auto-respawn within ~5s with backoff; (3) test mcp_restart to force-restart after rebuilding binary; (4) re-test rename_symbol on real code now that pos_to_index fix is in release binary. Open fixmes: organize_imports (dec1dfd7), get_type_hierarchy (a88584e0), find_definition cross-file didOpen missing (06d07481), extract/inline untested (74c02606)."
+  },
+  {
+    "id": "a6e0e21d-45c3-4188-9b30-f27eb58ad99d",
+    "text": "Fixed MCP auto-respawn detection bug: McpServerState.status changed from Mutex to Arc<Mutex<ServerStatus>> so it can be shared into the spawn_with_log waiter closure. When running_service.waiting() returns (child died), waiter now sets status=Crashed if currently Running/Starting — supervisor polls every 5s and respawns with backoff on Crashed. Previously nothing updated status when child died, so supervisor saw only \"Running\" forever and never respawned. Added status_handle param to spawn_with_log mirroring peer_slot pattern; all 3 call sites (initial_spawn, supervise, McpRestartTool) pass Arc::clone(&state.status). Release binary rebuilt clean."
+  },
+  {
+    "id": "61a6ebfa-036b-4ae9-bad9-51044ad1c2ba",
+    "text": "Handoff read. We're on `main` (not orefactor). main HEAD = d98b02c, already contains all 3 handoff commits plus newer work: vendored rust-mcp as mcp-rlsp with integration tests + pos_to_index fix, and McpManager auto-respawn supervisor (45cc621/d98b02c). Working tree clean except conclusions.json/fixme.json. All prior work merged into main history."
+  },
+  {
+    "id": "0477039c-7ef7-47b5-a08a-200c88e948e4",
+    "text": "Implementing proper LSP work-done-progress tracking in mcp-rlsp for indexing wait: declare window.workDoneProgress capability, handle server-initiated $/progress and window/workDoneProgressCreate messages during read_response loop. After initialized notification, poll workspace/symbol with empty query — when RA returns non-null array (or progress end), indexing is done. Key files: mcp-rlsp/src/analyzer/client.rs initialize(), send_request/read_response loop."
+  },
+  {
+    "id": "a9af0367-8787-4071-ae2a-fd24fe18d623",
+    "text": "Uncommitted state in mcp-rlsp/src/analyzer/client.rs is a half-finished refactor (IO task via channels, wait_for_project_index progress tracking) that crashed mid-edit — line 198-206 references undefined `kind` variable. No byte-slicing crash source found in client.rs itself; apply_edits_to_uri uses char-indexing safely. The \"numerical indexing into unicode\" crash the user mentioned is likely a latent issue elsewhere or was already fixed by commit 1a0f0c7 (pos_to_index off-by-one). Current task: fix syntax error so code compiles, then audit all string [] operations workspace-wide for panic-on-unicode-boundary risk."
+  },
+  {
+    "id": "cca31bc9-d61a-468b-afc0-eb3daaf96c4a",
+    "text": "Fixed mcp-rlsp client.rs half-finished IO-task refactor. Syntax error at line 198 (undefined `kind` variable in $/progress handler) fixed: now properly extracts kind from params.value.kind JSON path. Fixed borrow error (`as_ref()` → `as_mut()` for try_recv). Compiles clean, all 8 tests pass, release binary rebuilt and MCP server restarted. The refactor moves stdin/stdout ownership into a dedicated tokio IO task communicating via unbounded channels (sender: String out, receiver: Value in), adds workDoneProgress capability + wait_for_project_index() that drains progress notifications after initialize, did_open/did_close added to find_definition/find_references for cross-file resolution, organize_imports fixed end-range from u32::MAX to actual last-line char length with unfiltered fallback, get_type_hierarchy handles null result properly."
+  },
+  {
+    "id": "49dd848a-32b0-4b08-80e2-b8d6e0b075c4",
+    "text": "mcp-rlsp client.rs refactored: IO task via channels, lazy init (ensure_started on first tool call), wait_for_diagnostics after did_open (10s timeout), removed blocking wait_for_project_index from start(). MCP tool timeout bumped 10→30s in gladiator-tools/src/mcp.rs. All compile clean, tests pass. BUT running gladiator process still has old 10s binary — need user to restart gladiator so the 30s timeout takes effect. After restart, LSP tools should work: ensure_started spawns RA (no block), did_open+wait_for_diagnostics waits for file analysis, then LSP request within 30s budget."
   }
 ]
