@@ -37,6 +37,7 @@ pub struct App {
     is_busy: bool,
     spinner_frame: usize,
     last_spinner_advance: Option<Instant>,
+    stream_rx_chars: usize,
 }
 
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -57,6 +58,7 @@ impl App {
             is_busy: false,
             spinner_frame: 0,
             last_spinner_advance: None,
+            stream_rx_chars: 0,
         }
     }
 
@@ -107,7 +109,7 @@ impl App {
     /// Status string with spinner prefix when busy.
     pub fn display_status(&self) -> String {
         if self.is_busy {
-            format!("{} Working...   {}", SPINNER_FRAMES[self.spinner_frame], self.status)
+            format!("{} Working...   {} chars", SPINNER_FRAMES[self.spinner_frame], self.stream_rx_chars)
         } else {
             self.status.clone()
         }
@@ -356,6 +358,9 @@ impl App {
         // Spinner busy tracking: LlmStream/LlmThinking → busy; LlmStreamEnd → idle
         match msg_type.as_str() {
             "LlmStream" | "LlmThinking" => {
+                if !self.is_busy {
+                    self.stream_rx_chars = 0;
+                }
                 self.is_busy = true;
             }
             "LlmStreamEnd" => {
@@ -427,6 +432,7 @@ impl App {
         if matches!(msg_type.as_str(), "LlmStream" | "LlmThinking") {
             let payload = msg.payload_str().unwrap_or_default();
             if !payload.is_empty() {
+                self.stream_rx_chars += payload.chars().count();
                 let is_thinking = msg_type == "LlmThinking";
                 let target_role = if is_thinking {
                     crate::state::AppMessageRole::Thinking
