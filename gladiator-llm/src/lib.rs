@@ -19,6 +19,7 @@ pub mod generate_object;
 pub mod openai_chat;
 pub mod actor;
 pub mod standalone;
+pub mod similarity;
 
 // Re-export public API
 pub use error::LlmError;

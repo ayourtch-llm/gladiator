@@ -22,6 +22,8 @@ fn llm_config() -> LlmConfig {
         max_retries: 3,
         retry_base_delay_ms: 500,
         context_window: None,
+        loop_cycle_window: 5000,
+        loop_max_total_chars: 20000,
     }
 }
 

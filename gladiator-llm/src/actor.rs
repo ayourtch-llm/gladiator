@@ -11,6 +11,25 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info};
 
+/// Outcome of a streaming response, beyond the raw text/tool_calls. The agent
+/// uses this to decide whether to triage (idle / stuck-loop) or proceed normally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamSignal {
+    /// Stream completed normally (or was interrupted by an error handled elsewhere).
+    Normal,
+    /// No tokens arrived for the idle threshold (90s). The model went silent.
+    Idle,
+    /// The model was actively emitting tokens but repeating itself (think-loop).
+    /// Detected by `LoopDetector` comparing consecutive text/reasoning windows.
+    StuckLoop,
+}
+
+impl Default for StreamSignal {
+    fn default() -> Self {
+        StreamSignal::Normal
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct LlmActor {
     pub index: usize,
@@ -123,7 +142,7 @@ impl LlmActor {
         stream_id: &str,
         protocol: &dyn Protocol,
         _tool_runtime: &Arc<Mutex<ToolRuntime>>,
-    ) -> Result<(String, Vec<serde_json::Value>, bool), crate::error::LlmError> {
+    ) -> Result<(String, Vec<serde_json::Value>, StreamSignal), crate::error::LlmError> {
         let mut full_response = String::new();
         let mut stream = response.bytes_stream();
         let mut rx_chars: usize = 0;
@@ -132,7 +151,16 @@ impl LlmActor {
         let stream_timeout = std::time::Duration::from_secs(config.stream_timeout_secs);
         const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
         let mut last_activity = std::time::Instant::now();
-        let mut idle_timed_out = false;
+        let mut signal = StreamSignal::Normal;
+        // Loop detector: catches active streams where the model repeats itself
+        // (think-loops, dead-end snippets) — a case the idle timeout misses.
+        let mut loop_detector = crate::similarity::LoopDetector::new();
+        if config.loop_cycle_window > 0 {
+            loop_detector.cycle_window = config.loop_cycle_window;
+        }
+        if config.loop_max_total_chars > 0 {
+            loop_detector.max_total_chars = config.loop_max_total_chars;
+        }
 
         loop {
             let per_chunk = std::cmp::min(
@@ -167,6 +195,10 @@ impl LlmActor {
                                             .with_stream_id(stream_id.to_string());
                                             let _ = bus.publish(&self.id(), chunk_msg).await;
                                             full_response.push_str(&text);
+                                            if loop_detector.push(&text).is_some() {
+                                                signal = StreamSignal::StuckLoop;
+                                                break;
+                                            }
                                         }
                                     }
                                     LlmEvent::ReasoningDelta { text, .. } => {
@@ -180,6 +212,12 @@ impl LlmActor {
                                             .with_type("LlmThinking")
                                             .with_stream_id(stream_id.to_string());
                                             let _ = bus.publish(&self.id(), chunk_msg).await;
+                                            // Reasoning loops are the most common failure
+                                            // mode — feed them into the same detector.
+                                            if loop_detector.push(&text).is_some() {
+                                                signal = StreamSignal::StuckLoop;
+                                                break;
+                                            }
                                         }
                                     }
                                     LlmEvent::ToolInputStart { name, .. } => {
@@ -232,7 +270,15 @@ impl LlmActor {
                                     _ => {}
                                 }
                             }
+                            // Break out of payload processing if the loop detector fired.
+                            if matches!(signal, StreamSignal::StuckLoop) {
+                                break;
+                            }
                         }
+                    }
+                    // Break out of the outer stream loop if stuck.
+                    if matches!(signal, StreamSignal::StuckLoop) {
+                        break;
                     }
                 }
                 Ok(Some(Err(e))) => {
@@ -261,7 +307,7 @@ impl LlmActor {
                     )
                     .await;
                     if idle {
-                        idle_timed_out = true;
+                        signal = StreamSignal::Idle;
                         info!(
                             "[llm] idle timeout (no tokens for {:?}); returning partial response ({} chars)",
                             IDLE_TIMEOUT,
@@ -286,7 +332,7 @@ impl LlmActor {
         )
         .await;
 
-        Ok((full_response, state.tool_calls, idle_timed_out))
+        Ok((full_response, state.tool_calls, signal))
     }
 
     async fn send_request(
@@ -297,7 +343,7 @@ impl LlmActor {
         grammar: Option<&str>,
         bus: &gladiator_core::Bus,
         tool_runtime: Arc<Mutex<ToolRuntime>>,
-    ) -> Result<(String, Vec<serde_json::Value>, bool), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(String, Vec<serde_json::Value>, StreamSignal), Box<dyn std::error::Error + Send + Sync>> {
         if config.model.is_empty() {
             return Err("LLM model name is empty".into());
         }
@@ -427,7 +473,7 @@ impl Actor for LlmActor {
 
         tracing::info!("[llm{}] Listening on input='{}' control='{}'", self.index, self.input_topic, self.control_topic);
 
-        let mut active_request: Option<tokio::task::JoinHandle<Result<(String, Vec<serde_json::Value>, bool), Box<dyn std::error::Error + Send + Sync>>>> = None;
+        let mut active_request: Option<tokio::task::JoinHandle<Result<(String, Vec<serde_json::Value>, StreamSignal), Box<dyn std::error::Error + Send + Sync>>>> = None;
 
         loop {
             if let Some(req_handle) = active_request.take() {
@@ -444,17 +490,23 @@ impl Actor for LlmActor {
                             }
                         } => {
                                 match request_result {
-                                    Ok(Ok((full_response, mut tool_calls, idle_timed_out))) => {
-                                        if idle_timed_out && tool_calls.is_empty() {
-                                            // Signal the agent that the model went idle (stuck).
-                                            // Payload is the partial response so the agent can triage.
-                                            let idle_msg = gladiator_core::Message::new(
+                                    Ok(Ok((full_response, mut tool_calls, signal))) => {
+                                        if signal != StreamSignal::Normal && tool_calls.is_empty() {
+                                            // Model went idle OR got stuck in a loop. Signal the
+                                            // agent so it can triage and re-inject guidance. Payload
+                                            // is the partial response accumulated so far.
+                                            let msg_type = match signal {
+                                                StreamSignal::Idle => "LlmIdleTimeout",
+                                                StreamSignal::StuckLoop => "LlmStuckLoop",
+                                                StreamSignal::Normal => unreachable!(),
+                                            };
+                                            let signal_msg = gladiator_core::Message::new(
                                                 &self.output_topic,
                                                 &self.id(),
                                                 full_response,
                                             )
-                                            .with_type("LlmIdleTimeout");
-                                            let _ = bus.publish(&self.id(), idle_msg).await;
+                                            .with_type(msg_type);
+                                            let _ = bus.publish(&self.id(), signal_msg).await;
                                         } else if !tool_calls.is_empty() {
                                             // Tool call arguments arrive as a concatenation of streamed
                                             // string deltas; a dropped chunk can leave the accumulated

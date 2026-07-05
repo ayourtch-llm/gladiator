@@ -134,6 +134,77 @@ impl AgentActor {
         self
     }
 
+    /// Stuck-model triage: called when the LLM either went idle (>90s no
+    /// tokens) or got caught in a think-loop by the similarity detector. Saves
+    /// the partial response, warns the TUI, asks a standalone `llm_call` what
+    /// the model was likely trying to do, and injects the guidance as a user
+    /// message to trigger a fresh turn. `reason` describes the trigger for
+    /// logging/TUI; `partial` is whatever the stuck stream accumulated.
+    async fn triage_stuck_model(
+        &self,
+        bus: &Bus,
+        state: &Arc<tokio::sync::Mutex<ConversationState>>,
+        reason: &str,
+        partial: String,
+    ) {
+        {
+            let mut s = state.lock().await;
+            s.inference_in_flight = false;
+            s.was_interrupted = true;
+            if !partial.is_empty() {
+                s.add_assistant_message(partial.clone());
+            }
+        }
+
+        let warn = Message::new(
+            &self.stream_output_topic,
+            &self.id(),
+            format!("Model {} — running triage...", reason),
+        )
+        .with_type("Warning");
+        let _ = bus.publish(&self.id(), warn).await;
+
+        if let Some(ref llm_cfg) = self.llm_config {
+            let triage_prompt = format!(
+                "The coding agent's LLM appeared stuck ({reason}) and was interrupted.\n\n\
+                 Here is the partial output it managed to produce (may be empty):\n\
+                 \"\"\"\n{partial}\n\"\"\"\n\n\
+                 What was the model likely trying to do? What is the simplest, most concrete next \
+                 step it should take? Answer in 2-3 sentences max. If the partial output shows it \
+                 was repeating itself, point out exactly what the correct next action is.",
+                reason = reason,
+                partial = partial.chars().take(2000).collect::<String>(),
+            );
+            match gladiator_llm::llm_call(llm_cfg, &triage_prompt).await {
+                Ok(guidance) => {
+                    let guidance_msg = Message::new(
+                        &self.stream_output_topic,
+                        &self.id(),
+                        format!("Triage guidance: {}", guidance.trim()),
+                    )
+                    .with_type("Info");
+                    let _ = bus.publish(&self.id(), guidance_msg).await;
+                    let inject = format!(
+                        "The model was stuck ({reason}) and has been interrupted. \
+                         Triage guidance: {guidance}\n\n\
+                         Please continue based on this guidance. Do NOT repeat your previous reasoning.",
+                        reason = reason,
+                        guidance = guidance.trim(),
+                    );
+                    let _ = bus
+                        .publish(
+                            &self.id(),
+                            Message::new(&self.input_topic, &self.id(), inject),
+                        )
+                        .await;
+                }
+                Err(e) => {
+                    warn!("Triage llm_call failed: {}", e);
+                }
+            }
+        }
+    }
+
     /// After a tool call resolves, check whether the whole batch is now
     /// complete. If so, drain any user messages that arrived mid-execution,
     /// honour the iteration cap, and dispatch the next LLM turn. Shared by the
@@ -529,56 +600,24 @@ impl Actor for AgentActor {
                             let msg_type = msg.meta_type().unwrap_or_default().to_string();
                             debug!("Agent {} received LLM output (type={}): {}", self.index, msg_type, output);
 
-                            // Stuck-model detection: LLM went idle (>90s no tokens).
-                            // Triage via a standalone llm_call and inject as guidance.
-                            if msg_type == "LlmIdleTimeout" {
-                                let partial = output.clone();
-                                {
-                                    let mut s = state.lock().await;
-                                    s.inference_in_flight = false;
-                                    s.was_interrupted = true;
-                                    if !partial.is_empty() {
-                                        s.add_assistant_message(partial.clone());
-                                    }
-                                }
-
-                                // Warn the TUI
-                                let warn = Message::new(
-                                    &self.stream_output_topic,
-                                    &self.id(),
-                                    "Model went idle (>90s no tokens). Running triage...".to_string(),
-                                ).with_type("Warning");
-                                let _ = bus.publish(&self.id(), warn).await;
-
-                                // Triage call if config is available
-                                if let Some(ref llm_cfg) = self.llm_config {
-                                    let triage_prompt = format!(
-                                        "The coding agent's LLM appeared stuck — it produced no output for 90 seconds and was interrupted.\n\nHere is the partial output it managed to produce (may be empty):\n\"\"\"\n{}\n\"\"\"\n\nWhat was the model likely trying to do? What is the simplest, most concrete next step it should take? Answer in 2-3 sentences max.",
-                                        partial.chars().take(2000).collect::<String>(),
-                                    );
-                                    match gladiator_llm::llm_call(llm_cfg, &triage_prompt).await {
-                                        Ok(guidance) => {
-                                            let guidance_msg = Message::new(
-                                                &self.stream_output_topic,
-                                                &self.id(),
-                                                format!("Triage guidance: {}", guidance.trim()),
-                                            ).with_type("Info");
-                                            let _ = bus.publish(&self.id(), guidance_msg).await;
-                                            // Inject as a user message to trigger a fresh turn
-                                            let inject = format!(
-                                                "The model went idle and was interrupted. Triage guidance: {}\n\nPlease continue based on this guidance.",
-                                                guidance.trim()
-                                            );
-                                            let _ = bus.publish(
-                                                &self.id(),
-                                                Message::new(&self.input_topic, &self.id(), inject),
-                                            ).await;
-                                        }
-                                        Err(e) => {
-                                            warn!("Triage llm_call failed: {}", e);
-                                        }
-                                    }
-                                }
+                            // Stuck-model detection: the LLM either went idle
+                            // (>90s no tokens) or got caught repeating itself
+                            // (think-loop, caught by similarity detection).
+                            // Both signals trigger triage via a standalone
+                            // llm_call + guidance injection.
+                            if msg_type == "LlmIdleTimeout" || msg_type == "LlmStuckLoop" {
+                                let reason = if msg_type == "LlmIdleTimeout" {
+                                    "went idle (>90s no tokens)"
+                                } else {
+                                    "stuck in a think-loop (repeated output)"
+                                };
+                                self.triage_stuck_model(
+                                    bus,
+                                    &state,
+                                    reason,
+                                    output.clone(),
+                                )
+                                .await;
                             } else if output.starts_with("Interrupted:") {
                                 let mut s = state.lock().await;
                                 s.was_interrupted = true;

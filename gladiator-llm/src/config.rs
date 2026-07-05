@@ -48,6 +48,16 @@ pub fn merge_config(
                 req.retry_base_delay_ms
             },
             context_window: req.context_window.or(base.context_window),
+            loop_cycle_window: if req.loop_cycle_window == 0 {
+                base.loop_cycle_window
+            } else {
+                req.loop_cycle_window
+            },
+            loop_max_total_chars: if req.loop_max_total_chars == 0 {
+                base.loop_max_total_chars
+            } else {
+                req.loop_max_total_chars
+            },
         },
         None => base.clone(),
     }

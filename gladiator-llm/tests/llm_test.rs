@@ -372,6 +372,8 @@ fn config_merge_override_takes_precedence() {
         max_retries: 3,
         retry_base_delay_ms: 500,
         context_window: Some(8192),
+        loop_cycle_window: 5000,
+        loop_max_total_chars: 20000,
     };
     let override_cfg = gladiator_core::LlmConfig {
         model: "override-model".to_string(),
@@ -384,6 +386,8 @@ fn config_merge_override_takes_precedence() {
         max_retries: 0,
         retry_base_delay_ms: 0,
         context_window: None,
+        loop_cycle_window: 0,
+        loop_max_total_chars: 0,
     };
     let merged = merge_config(&base, Some(&override_cfg));
     assert_eq!(merged.model, "override-model");

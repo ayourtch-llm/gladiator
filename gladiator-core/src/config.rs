@@ -249,6 +249,14 @@ pub struct LlmConfig {
     /// fails or returns no recognisable field.
     #[serde(default)]
     pub context_window: Option<usize>,
+    /// Loop-detector cycle window in chars. Consecutive windows of this size
+    /// are compared for similarity. Default 5000.
+    #[serde(default = "default_loop_cycle_window")]
+    pub loop_cycle_window: usize,
+    /// Loop-detector hard cap in chars. Streaming is broken unconditionally
+    /// once this many chars have been emitted in a single response. Default 20000.
+    #[serde(default = "default_loop_max_total_chars")]
+    pub loop_max_total_chars: usize,
 }
 
 impl Default for LlmConfig {
@@ -264,6 +272,8 @@ impl Default for LlmConfig {
             max_retries: default_max_retries(),
             retry_base_delay_ms: default_retry_base_delay_ms(),
             context_window: None,
+            loop_cycle_window: default_loop_cycle_window(),
+            loop_max_total_chars: default_loop_max_total_chars(),
         }
     }
 }
@@ -294,6 +304,14 @@ fn default_max_retries() -> u32 {
 }
 fn default_retry_base_delay_ms() -> u64 {
     500
+}
+
+fn default_loop_cycle_window() -> usize {
+    5000
+}
+
+fn default_loop_max_total_chars() -> usize {
+    20000
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
