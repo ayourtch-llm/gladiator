@@ -75,7 +75,7 @@ default = true
 expose = []
 
 [mcp_servers.mcp-rlsp]
-command = ["target/debug/mcp-rlsp"]
+command = ["target/release/mcp-rlsp"]
 default = true
 expose = []
 
