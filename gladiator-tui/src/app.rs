@@ -63,6 +63,14 @@ pub struct App {
     /// turn's actual input size). Used as a proxy for "new information" in this
     /// request until fresh stats arrive.
     current_request_input_tokens: Option<u64>,
+
+    // --- Up/Down navigation mode stickiness ---
+    /// When true, plain Up/Down are interpreted as history navigation even if
+    /// the buffer is multi-line. Set when an Up/Down key performs a history
+    /// action; cleared by any other in-buffer editing/navigation key (Left,
+    /// Right, Backspace, char insert, Home/End, etc.) so that subsequent
+    /// Up/Down revert to visual line movement.
+    up_down_history_mode: bool,
 }
 
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -92,6 +100,7 @@ impl App {
             request_start: None,
             prefill_history: Vec::new(),
             current_request_input_tokens: None,
+            up_down_history_mode: false,
         }
     }
 
@@ -317,11 +326,13 @@ impl App {
 
             // Enter: plain = submit, Shift/Alt+Enter = newline
             KeyCode::Enter if shift || alt => {
+                self.up_down_history_mode = false;
                 self.input.insert_newline();
                 None
             }
             KeyCode::Enter => {
                 let text = self.input.submit();
+                self.up_down_history_mode = false;
                 if !text.is_empty() {
                     // Don't add to chat locally — the agent will publish
                     // UserMessageDisplayed or UserMessageQueued events
@@ -417,16 +428,23 @@ impl App {
             }
 
             // Up/Down: visual line movement (if multiline) or history navigation.
-            // Shift+Up/Down always scrolls.
+            // Shift+Up/Down always scrolls. If up_down_history_mode is sticky
+            // (user previously used Up/Down for history), keep treating plain
+            // Up/Down as history even in multi-line buffers — until any other
+            // editing/navigation key breaks the mode.
             KeyCode::Up if shift => {
                 self.scroll.scroll_up();
                 None
             }
             KeyCode::Up => {
-                if self.input.is_multiline(self.terminal_width, InputState::PROMPT_LEN) {
-                    self.input.cursor_up(self.terminal_width, InputState::PROMPT_LEN);
-                } else {
+                let is_multi = self.input.is_multiline(self.terminal_width, InputState::PROMPT_LEN);
+                if !is_multi || self.up_down_history_mode {
+                    // Single-line: always history. Multi-line + sticky mode:
+                    // keep as history until another key breaks the mode.
                     self.input.history_prev();
+                    self.up_down_history_mode = true;
+                } else {
+                    self.input.cursor_up(self.terminal_width, InputState::PROMPT_LEN);
                 }
                 None
             }
@@ -435,10 +453,17 @@ impl App {
                 None
             }
             KeyCode::Down => {
-                if self.input.is_multiline(self.terminal_width, InputState::PROMPT_LEN) {
-                    self.input.cursor_down(self.terminal_width, InputState::PROMPT_LEN);
-                } else {
+                let is_multi = self.input.is_multiline(self.terminal_width, InputState::PROMPT_LEN);
+                if !is_multi || self.up_down_history_mode {
                     self.input.history_next();
+                    // If we've returned to an empty buffer (history end),
+                    // allow the mode to reset so a fresh Up in multi-line
+                    // starts doing line navigation again.
+                    if self.input.buffer().is_empty() && self.input.cursor() == 0 {
+                        self.up_down_history_mode = false;
+                    }
+                } else {
+                    self.input.cursor_down(self.terminal_width, InputState::PROMPT_LEN);
                 }
                 None
             }
@@ -451,27 +476,41 @@ impl App {
                 self.scroll.scroll_page_down();
                 None
             }
-            KeyCode::Home => {
+            // Home/End inside the input: break sticky history mode and move
+            // cursor to line start/end. Shift+Home/End scrolls chat.
+            KeyCode::Home if shift => {
                 self.scroll.scroll_to_top();
                 None
             }
-            KeyCode::End => {
+            KeyCode::Home => {
+                self.up_down_history_mode = false;
+                self.input.cursor_line_start();
+                None
+            }
+            KeyCode::End if shift => {
                 self.scroll.scroll_to_bottom();
+                None
+            }
+            KeyCode::End => {
+                self.up_down_history_mode = false;
+                self.input.cursor_line_end();
                 None
             }
 
             // Backspace (without Alt — Alt+Backspace handled above)
             KeyCode::Backspace => {
+                self.up_down_history_mode = false;
                 self.input.backspace();
                 None
             }
 
-            // Left/Right: cursor (or scroll with Shift)
+            // Left/Right: cursor (or scroll with Shift). Breaks sticky mode.
             KeyCode::Left if shift => {
                 self.scroll.scroll_left();
                 None
             }
             KeyCode::Left => {
+                self.up_down_history_mode = false;
                 self.input.cursor_left();
                 None
             }
@@ -480,12 +519,14 @@ impl App {
                 None
             }
             KeyCode::Right => {
+                self.up_down_history_mode = false;
                 self.input.cursor_right();
                 None
             }
 
-            // Plain char insert (no Ctrl modifier)
+            // Plain char insert (no Ctrl modifier). Breaks sticky mode.
             KeyCode::Char(ch) if !ctrl => {
+                self.up_down_history_mode = false;
                 self.input.insert_char(ch);
                 None
             }

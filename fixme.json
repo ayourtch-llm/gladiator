@@ -122,6 +122,6 @@
   {
     "id": "2a54f4c9-e0e9-42db-b3fc-c79576334fe3",
     "phrase": "a tweak: if the user has been using up/down to check history, interpret the up/down as history controls even in multiline messages, until any other navigation is done within the multiline - then start treating up/down as the line navigation.",
-    "done": false
+    "done": true
   }
 ]
