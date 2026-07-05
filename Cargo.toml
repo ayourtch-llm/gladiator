@@ -11,6 +11,7 @@ members = [
     "mcp-rlsp",
     "mcp-websearch",
     "mcp-tagged-fileops",
+    "mcp-test-client",
 ]
 resolver = "2"
 
