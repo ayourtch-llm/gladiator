@@ -126,10 +126,11 @@ impl InputState {
     /// Used for visual line calculations (hard-wrapping the first line).
     pub const PROMPT_LEN: usize = 2;
     pub fn new() -> Self {
+        let history = Self::load_history();
         Self {
             buffer: String::new(),
             cursor: 0,
-            history: Vec::new(),
+            history,
             history_index: None,
             kill_ring: Vec::new(),
             last_op_was_kill: false,
@@ -146,6 +147,26 @@ impl InputState {
 
     pub fn history(&self) -> &[String] {
         &self.history
+    }
+
+    /// Load history from tmp/history.json. Called once at startup.
+    pub fn load_history() -> Vec<String> {
+        std::fs::read_to_string(HISTORY_FILE)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    /// Save current history to tmp/history.json. Called after each submit.
+    pub fn save_history(&self) {
+        if let Some(parent) = std::path::Path::new(HISTORY_FILE).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let trimmed: Vec<String> = self.history.iter().rev().take(MAX_HISTORY).cloned().collect();
+        let reversed: Vec<String> = trimmed.into_iter().rev().collect();
+        if let Ok(json) = serde_json::to_string(&reversed) {
+            let _ = std::fs::write(HISTORY_FILE, json);
+        }
     }
 
     pub fn insert_char(&mut self, ch: char) {
@@ -454,6 +475,7 @@ impl InputState {
         let text = self.buffer.clone();
         if !text.is_empty() {
             self.history.push(text.clone());
+            self.save_history();
         }
         self.clear();
         text
@@ -732,6 +754,9 @@ impl Default for InputState {
 }
 
 use std::cell::Cell;
+
+const HISTORY_FILE: &str = "tmp/history.json";
+const MAX_HISTORY: usize = 500;
 
 #[derive(Debug)]
 pub struct ScrollState {
