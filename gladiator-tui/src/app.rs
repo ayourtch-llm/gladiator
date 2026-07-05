@@ -857,11 +857,14 @@ impl App {
                 let tid = app_msg.tool_id.as_ref().unwrap();
                 if let Some(idx) = self.chat.find_tool_by_id(tid) {
                     // Append result text after a separator so call + result
-                    // show as one coalesced block.
+                    // show as one coalesced block. Strip the redundant function name
+                    // and tool_call_id from the result line since they're already in
+                    // the tool-call header above.
                     let existing_content = self.chat.messages()[idx].content.clone();
+                    let stripped = strip_tool_result_header(&app_msg.content);
                     self.chat.replace_tool(
                         idx,
-                        format!("{}\n  {}", existing_content, app_msg.content),
+                        format!("{}\n  {}", existing_content, stripped),
                     );
                     return;
                 }
@@ -1219,4 +1222,17 @@ pub async fn run_app(
     execute!(io::stdout(), LeaveAlternateScreen).ok();
 
     Ok(())
+}
+
+/// Strip the redundant `[tool_result] func_name(tool_call_id)` prefix from a
+/// tool result line, leaving just `=> text` (or `(error) => text`).
+fn strip_tool_result_header(content: &str) -> String {
+    // Input form: "  [tool_result] func_name(id) => rest"
+    // or          : "  [tool_error] func_name(id) => rest"
+    let trimmed = content.trim();
+    if let Some(arrow_pos) = trimmed.find("=>") {
+        let after_arrow = &trimmed[arrow_pos..];
+        return format!("  {}", after_arrow.trim());
+    }
+    content.to_string()
 }
