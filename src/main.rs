@@ -291,7 +291,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     })
     .with_state_topics(config.topics.agent_state_control.clone(), config.topics.agent_state.clone())
     .with_llm_stats_topic(config.topics.llm_stats.clone())
-    .with_context_window(config.llm.context_window);
+    .with_context_window(config.llm.context_window)
+    .with_llm_config(config.llm.clone());
 
     let agent_handle = bus.spawn_actor(agent_actor).await?;
 

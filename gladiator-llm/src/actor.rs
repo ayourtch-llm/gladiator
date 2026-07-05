@@ -123,7 +123,7 @@ impl LlmActor {
         stream_id: &str,
         protocol: &dyn Protocol,
         _tool_runtime: &Arc<Mutex<ToolRuntime>>,
-    ) -> Result<(String, Vec<serde_json::Value>), crate::error::LlmError> {
+    ) -> Result<(String, Vec<serde_json::Value>, bool), crate::error::LlmError> {
         let mut full_response = String::new();
         let mut stream = response.bytes_stream();
         let mut rx_chars: usize = 0;
@@ -132,6 +132,7 @@ impl LlmActor {
         let stream_timeout = std::time::Duration::from_secs(config.stream_timeout_secs);
         const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
         let mut last_activity = std::time::Instant::now();
+        let mut idle_timed_out = false;
 
         loop {
             let per_chunk = std::cmp::min(
@@ -260,6 +261,7 @@ impl LlmActor {
                     )
                     .await;
                     if idle {
+                        idle_timed_out = true;
                         info!(
                             "[llm] idle timeout (no tokens for {:?}); returning partial response ({} chars)",
                             IDLE_TIMEOUT,
@@ -284,7 +286,7 @@ impl LlmActor {
         )
         .await;
 
-        Ok((full_response, state.tool_calls))
+        Ok((full_response, state.tool_calls, idle_timed_out))
     }
 
     async fn send_request(
@@ -295,7 +297,7 @@ impl LlmActor {
         grammar: Option<&str>,
         bus: &gladiator_core::Bus,
         tool_runtime: Arc<Mutex<ToolRuntime>>,
-    ) -> Result<(String, Vec<serde_json::Value>), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(String, Vec<serde_json::Value>, bool), Box<dyn std::error::Error + Send + Sync>> {
         if config.model.is_empty() {
             return Err("LLM model name is empty".into());
         }
@@ -425,7 +427,7 @@ impl Actor for LlmActor {
 
         tracing::info!("[llm{}] Listening on input='{}' control='{}'", self.index, self.input_topic, self.control_topic);
 
-        let mut active_request: Option<tokio::task::JoinHandle<Result<(String, Vec<serde_json::Value>), Box<dyn std::error::Error + Send + Sync>>>> = None;
+        let mut active_request: Option<tokio::task::JoinHandle<Result<(String, Vec<serde_json::Value>, bool), Box<dyn std::error::Error + Send + Sync>>>> = None;
 
         loop {
             if let Some(req_handle) = active_request.take() {
@@ -442,8 +444,18 @@ impl Actor for LlmActor {
                             }
                         } => {
                                 match request_result {
-                                    Ok(Ok((full_response, mut tool_calls))) => {
-                                        if !tool_calls.is_empty() {
+                                    Ok(Ok((full_response, mut tool_calls, idle_timed_out))) => {
+                                        if idle_timed_out && tool_calls.is_empty() {
+                                            // Signal the agent that the model went idle (stuck).
+                                            // Payload is the partial response so the agent can triage.
+                                            let idle_msg = gladiator_core::Message::new(
+                                                &self.output_topic,
+                                                &self.id(),
+                                                full_response,
+                                            )
+                                            .with_type("LlmIdleTimeout");
+                                            let _ = bus.publish(&self.id(), idle_msg).await;
+                                        } else if !tool_calls.is_empty() {
                                             // Tool call arguments arrive as a concatenation of streamed
                                             // string deltas; a dropped chunk can leave the accumulated
                                             // arguments as truncated JSON. Try to repair in place before
