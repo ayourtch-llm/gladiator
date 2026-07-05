@@ -218,5 +218,9 @@
   {
     "id": "9aab5720-dae3-40c6-b2d3-5ac6a02938ea",
     "text": "RA null-results investigation: RA returns null for ALL LSP queries (find_definition, documentSymbol, hover, workspace/symbol) on our gladiator workspace but works perfectly on standalone temp projects and minimal workspaces. Added workspaceFolders to initialize params, did_open dedup via HashSet, wait_for_diagnostics after didOpen — committed as 9fe385b. Root cause is project-specific (possibly the virtual manifest with \".\" member + edition=2024 path deps). The three remaining mcp-rlsp fixmes (dec1dfd7 organize_imports, a88584e0 type_hierarchy, 74c02606 extract/inline) are all blocked on this same root cause. Pivoting to other work — the RA investigation needs a different approach like trying rust-project.json or checking if removing \".\" from workspace members fixes it.\""
+  },
+  {
+    "id": "8868a4d6-d922-40e4-abb2-8c204faa998f",
+    "text": "RA null-results root cause confirmed: rust-analyzer can't handle workspaces with \".\" as a member. Removing \".\" and copying to /tmp makes RA return symbols correctly. However, passing individual crate dirs (excluding \".\") as workspaceFolders doesn't fix it when the parent Cargo.toml still exists — RA walks up regardless. The three remaining mcp-rlsp LSP fixmes (organize_imports dec1dfd7, type_hierarchy a88584e0, extract/inline 74c02606) are all blocked on this same root cause. Next approach to try: generate rust-project.json in CWD before starting RA, OR set the `RA_NO_AUTO_LINK` env var if it exists.\""
   }
 ]

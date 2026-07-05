@@ -12,6 +12,9 @@ members = [
     "mcp-websearch",
     "mcp-tagged-fileops",
     "mcp-test-client",
+    "mcp-pty-server",
+    "mcp-loader",
+    "mcp-pdf-server",
 ]
 resolver = "2"
 
