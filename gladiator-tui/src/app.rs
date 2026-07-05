@@ -48,6 +48,21 @@ pub struct App {
     /// show a "Running tools..." spinner with completed/total counts.
     pending_tool_calls: usize,
     total_tool_calls: usize,
+
+    // --- Thinking ETA estimation ---
+    /// Instant when the current (or most recent) LLM request was sent — used
+    /// to measure prefill duration and elapsed time for the status display.
+    request_start: Option<Instant>,
+    /// History of past prefill durations paired with their input-token counts,
+    /// so we can estimate how long future requests will take. Stored as
+    /// (duration_secs, input_tokens). Most recent first is not required — we
+    /// average over all entries.
+    prefill_history: Vec<(u64, u64)>,
+    /// Input tokens for the *current* request if known yet; populated from the
+    /// most-recent StreamStats usage.input_tokens (which reflects the last
+    /// turn's actual input size). Used as a proxy for "new information" in this
+    /// request until fresh stats arrive.
+    current_request_input_tokens: Option<u64>,
 }
 
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -74,6 +89,9 @@ impl App {
             is_prefill: false,
             pending_tool_calls: 0,
             total_tool_calls: 0,
+            request_start: None,
+            prefill_history: Vec::new(),
+            current_request_input_tokens: None,
         }
     }
 
@@ -121,6 +139,11 @@ impl App {
     pub fn reset_context_usage(&mut self) {
         self.ctx_used_tokens = None;
         self.ctx_window = None;
+        // Also clear ETA history — a loaded/restarted session has different
+        // context characteristics, past timing data is unreliable.
+        self.prefill_history.clear();
+        self.current_request_input_tokens = None;
+        self.request_start = None;
     }
 
     /// Advance the spinner frame if busy and ~100ms have elapsed since last advance.
@@ -139,6 +162,58 @@ impl App {
         }
     }
 
+    /// Estimate remaining seconds for the current prefill phase based on
+    /// historical (duration, input_tokens) pairs. Returns None if there's
+    /// insufficient history to estimate.
+    ///
+    /// Algorithm: compute a simple linear ratio from past samples —
+    /// `estimated_total = avg(duration / tokens) * current_tokens`. If we have
+    /// elapsed time already and it exceeds the estimate by > 2x, assume cache
+    /// was cold (cache-miss fallback): re-baseline using only this request's
+    /// own ratio once known. For now while in-flight with no history for THIS
+    /// request yet, just use past averages.
+    fn estimated_prefill_total_secs(&self) -> Option<u64> {
+        if self.prefill_history.is_empty() {
+            return None;
+        }
+        let current_tokens = self.current_request_input_tokens.unwrap_or(0);
+        // If we don't know the token count for this request yet, fall back to
+        // averaging past durations directly.
+        if current_tokens == 0 {
+            let avg_dur: f64 =
+                self.prefill_history.iter().map(|(d, _)| *d as f64).sum::<f64>()
+                    / self.prefill_history.len() as f64;
+            return Some(avg_dur.max(1.0) as u64);
+        }
+        // Compute average seconds-per-token from history (only samples with
+        // non-zero tokens contribute).
+        let ratios: Vec<f64> = self
+            .prefill_history
+            .iter()
+            .filter(|(_, t)| *t > 0)
+            .map(|(d, t)| *d as f64 / *t as f64)
+            .collect();
+        if ratios.is_empty() {
+            // All history has zero tokens — just average durations.
+            let avg_dur: f64 =
+                self.prefill_history.iter().map(|(d, _)| *d as f64).sum::<f64>()
+                    / self.prefill_history.len() as f64;
+            return Some(avg_dur.max(1.0) as u64);
+        }
+        let avg_ratio: f64 = ratios.iter().sum::<f64>() / ratios.len() as f64;
+        let est_total = (avg_ratio * current_tokens as f64).max(1.0);
+        // Cache-miss fallback: if elapsed already exceeds 2× the estimate,
+        // treat this request as a cold-cache baseline — return None so we
+        // show only elapsed time rather than a misleading ETA.
+        if let Some(start) = self.request_start {
+            let elapsed = start.elapsed().as_secs_f64();
+            if est_total > 0.0 && elapsed > est_total * 2.0 {
+                return None;
+            }
+        }
+        Some(est_total as u64)
+    }
+
     /// Status string with spinner prefix when busy.
     pub fn display_status(&self) -> String {
         let ctx_part = match (self.ctx_used_tokens, self.ctx_window) {
@@ -154,7 +229,21 @@ impl App {
                 ("Running tools...",
                  format!(" {}/{}", self.total_tool_calls - self.pending_tool_calls, self.total_tool_calls))
             } else if self.is_prefill {
-                ("Thinking...", String::new())
+                // Thinking... with ETA based on past prefill durations.
+                let elapsed_secs = self
+                    .request_start
+                    .map(|s| s.elapsed().as_secs())
+                    .unwrap_or(0);
+                match self.estimated_prefill_total_secs() {
+                    Some(total) if total > 0 => {
+                        let remaining = total.saturating_sub(elapsed_secs);
+                        ("Thinking...", format!(" ~{}s left", remaining))
+                    }
+                    _ => {
+                        // No history (or cache-miss fallback): show elapsed only.
+                        ("Thinking...", format!(" {}s", elapsed_secs))
+                    }
+                }
             } else {
                 ("Working...", format!("   {} chars", self.stream_rx_chars))
             };
@@ -421,10 +510,26 @@ impl App {
                 self.stream_rx_chars = 0;
                 self.spinner_frame = 0;
                 self.last_spinner_advance = None;
+                // Record the start instant so we can measure prefill duration
+                // and show elapsed/ETA in the status bar.
+                self.request_start = Some(Instant::now());
             }
             "LlmStream" | "LlmThinking" => {
                 if !self.is_busy {
                     self.stream_rx_chars = 0;
+                }
+                // On the transition prefill → first token, record how long
+                // the prefill phase took so we can estimate future requests.
+                if self.is_prefill {
+                    if let Some(start) = self.request_start.take() {
+                        let dur_secs = start.elapsed().as_secs();
+                        let input_tok = self.current_request_input_tokens.unwrap_or(0);
+                        self.prefill_history.push((dur_secs, input_tok));
+                        // Keep history bounded to avoid unbounded growth.
+                        if self.prefill_history.len() > 20 {
+                            self.prefill_history.remove(0);
+                        }
+                    }
                 }
                 self.is_busy = true;
                 // First token arrives — no longer in prefill.
@@ -440,12 +545,19 @@ impl App {
         }
 
         // Capture context-usage stats from StreamStats (before the noise filter
-        // drops them) so we can show "ctx: N/M tok" in the status bar.
+        // drops them) so we can show "ctx: N/M tok" in the status bar. Also
+        // stash input_tokens as a proxy for this request's size — it will be
+        // used to estimate ETA on the next prefill.
         if msg_type == "StreamStats" {
             let usage = msg.payload.get("usage");
-            self.ctx_used_tokens = usage
+            let input_tok = usage
                 .and_then(|u| u.get("input_tokens"))
                 .and_then(|v| v.as_u64());
+            self.ctx_used_tokens = input_tok;
+            // Remember the most recent input-token count for ETA estimation.
+            if let Some(tok) = input_tok {
+                self.current_request_input_tokens = Some(tok);
+            }
             self.ctx_window = msg
                 .payload
                 .get("context_window")

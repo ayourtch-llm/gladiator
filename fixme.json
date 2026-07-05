@@ -117,6 +117,11 @@
   {
     "id": "7f4b40c7-7adb-4737-b950-a871a64dae80",
     "phrase": "For \"Thinking ...\" indicator - it might be a nice idea to display the anticipated time left, based on the previous occurrences - take the amount of \"new\" information in the past requests divided by the time it took to process it - multiplied by the amount of \"new\" information in this request. If that estimate turns out to be very wrong - assume the cache was off and consider the entire request to be \"new\" and give estimation based on that. This would be a nice quality of life improvement for the UX",
+    "done": true
+  },
+  {
+    "id": "2a54f4c9-e0e9-42db-b3fc-c79576334fe3",
+    "phrase": "a tweak: if the user has been using up/down to check history, interpret the up/down as history controls even in multiline messages, until any other navigation is done within the multiline - then start treating up/down as the line navigation.",
     "done": false
   }
 ]
