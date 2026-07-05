@@ -95,6 +95,6 @@ default = true
 expose = []
 
 [mcp_servers.mcp-random]
-command = ["/Users/ayourtch/rust/mcp-random/target/release/mcp-random"]
+command = ["target/debug/mcp-random"]
 default = true
 expose = []
