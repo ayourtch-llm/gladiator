@@ -44,6 +44,10 @@ pub struct App {
     ctx_window: Option<usize>,
     /// True during the prefill phase (request sent, no token received yet).
     is_prefill: bool,
+    /// Number of tool calls dispatched but not yet resolved. When > 0 we
+    /// show a "Running tools..." spinner with completed/total counts.
+    pending_tool_calls: usize,
+    total_tool_calls: usize,
 }
 
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -68,6 +72,8 @@ impl App {
             ctx_used_tokens: None,
             ctx_window: None,
             is_prefill: false,
+            pending_tool_calls: 0,
+            total_tool_calls: 0,
         }
     }
 
@@ -104,6 +110,8 @@ impl App {
     pub fn stop_spinner(&mut self) {
         self.is_busy = false;
         self.is_prefill = false;
+        self.pending_tool_calls = 0;
+        self.total_tool_calls = 0;
         self.spinner_frame = 0;
         self.last_spinner_advance = None;
     }
@@ -142,10 +150,17 @@ impl App {
             _ => String::new(),
         };
         if self.is_busy {
-            let label = if self.is_prefill { "Thinking..." } else { "Working..." };
+            let (label, detail) = if self.pending_tool_calls > 0 {
+                ("Running tools...",
+                 format!(" {}/{}", self.total_tool_calls - self.pending_tool_calls, self.total_tool_calls))
+            } else if self.is_prefill {
+                ("Thinking...", String::new())
+            } else {
+                ("Working...", format!("   {} chars", self.stream_rx_chars))
+            };
             format!(
-                "{} {}   {} chars{}",
-                SPINNER_FRAMES[self.spinner_frame], label, self.stream_rx_chars, ctx_part
+                "{} {}{}{}",
+                SPINNER_FRAMES[self.spinner_frame], label, detail, ctx_part
             )
         } else {
             let base = self.status.clone();
@@ -401,6 +416,8 @@ impl App {
             "LlmRequestSent" => {
                 self.is_busy = true;
                 self.is_prefill = true;
+                self.pending_tool_calls = 0;
+                self.total_tool_calls = 0;
                 self.stream_rx_chars = 0;
                 self.spinner_frame = 0;
                 self.last_spinner_advance = None;
@@ -591,6 +608,28 @@ impl App {
             self.last_tool_call_index = call_index;
             self.last_stream_type = None;
             return;
+        }
+
+        // Track tool-call dispatch/resolution for the "Running tools..." spinner.
+        if msg_type == "Info" {
+            let content = msg.payload_str().unwrap_or_default();
+            if content.starts_with("Calling tool:") {
+                self.pending_tool_calls += 1;
+                self.total_tool_calls = self.pending_tool_calls;
+                self.is_busy = true;
+                self.is_prefill = false;
+            }
+        }
+
+        // LlmToolResult: one pending call resolved.
+        if msg_type == "LlmToolResult" && self.pending_tool_calls > 0 {
+            self.pending_tool_calls -= 1;
+            if self.pending_tool_calls == 0 {
+                self.total_tool_calls = 0;
+                self.is_busy = false;
+                self.spinner_frame = 0;
+                self.last_spinner_advance = None;
+            }
         }
 
         // All other message types

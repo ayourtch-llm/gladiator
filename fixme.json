@@ -102,11 +102,11 @@
   {
     "id": "7b8c0e5d-74f3-4dab-8449-a061d53a204b",
     "phrase": "The spinner needs its own state when the agent is in the state of issuing tool calls - in case the tool calls take much time. it should probably show total tool calls, and number of completed tool calls during that moment.",
-    "done": false
+    "done": true
   },
   {
     "id": "0c08e0c5-a253-4434-a02e-d8be00eed584",
     "phrase": "the \"N chars\" indicator on the left needs to be shown/populated also when we are parsing/forming the tool calls - maybe with the respective different title instead of simply \"Working...\" - for that particular state.",
-    "done": false
+    "done": true
   }
 ]
