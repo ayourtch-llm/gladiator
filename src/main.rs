@@ -59,27 +59,18 @@ async fn spawn_mcp_servers(
     _bus: &Bus,
     config: &Config,
     registry: &mut ToolRegistry,
-) -> Vec<gladiator_tools::McpServerHandle> {
-    let mut handles = Vec::new();
-    for (name, mcp_config) in &config.mcp_servers {
-        if mcp_config.command.is_empty() {
-            continue;
-        }
-        let runner = gladiator_tools::McpServerRunner::new(name.clone(), mcp_config.clone());
-        match runner.spawn().await {
-            Ok(handle) => {
-                let tool_actors = handle.tool_actors();
-                    for tool in tool_actors {
-                        registry.add_arc(tool);
-                    }
-                    handles.push(handle);
-            }
-            Err(e) => {
-                tracing::error!("Failed to spawn MCP server '{}': {}", name, e);
-            }
-        }
+) -> std::sync::Arc<gladiator_tools::McpManager> {
+    let (manager, tools) = gladiator_tools::McpManager::spawn_all(&config.mcp_servers).await;
+    for tool in tools {
+        registry.add_arc(tool);
     }
-    handles
+    // Register admin tools so the agent can inspect/restart/disable MCP servers.
+    let manager_arc = std::sync::Arc::new(manager);
+    registry.add(Box::new(gladiator_tools::McpStatusTool::new(manager_arc.clone())));
+    registry.add(Box::new(gladiator_tools::McpRestartTool::new(manager_arc.clone())));
+    let ret = manager_arc.clone();
+    registry.add(Box::new(gladiator_tools::McpDisableTool::new(manager_arc)));
+    ret
 }
 
 #[tokio::main]
@@ -255,7 +246,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing::info!("Built-in tools registered: {} tools", registry.len());
 
     // Spawn MCP tool servers and add their tools to the registry
-    let _mcp_handles = spawn_mcp_servers(&bus, &config, &mut registry).await;
+    let _manager = spawn_mcp_servers(&bus, &config, &mut registry).await;
     tracing::info!("Tool registry (with MCP): {} tools", registry.len());
 
     // Create and spawn LLM actor

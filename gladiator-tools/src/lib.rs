@@ -2,6 +2,7 @@ pub mod builtin;
 pub mod conclusions;
 pub mod fixme;
 pub mod mcp;
+pub mod mcp_admin;
 pub mod registry;
 pub mod runner;
 pub mod tool;
@@ -11,6 +12,10 @@ pub use builtin::{BashTool, EditFileTool, GlobTool, GrepTool, ReadFileTool, Writ
 pub use conclusions::{ConclusionEntry, ConclusionStore, GetConclusionsTool, RecordConclusionTool};
 pub use fixme::{CreateFixmeTool, FixmeEntry, FixmeStore, GetAllFixmesTool, GetOpenFixmesTool, MarkFixmeDoneTool};
 pub use mcp::{McpClientHandler, McpServerHandle, McpServerRunner, McpTool};
+pub use mcp_admin::{
+    McpManager, McpRestartTool, McpStatusTool, McpDisableTool,
+    ServerStatus as McpServerStatus,
+};
 pub use registry::ToolRegistry;
 pub use runner::ToolActorRunner;
 pub use tool::{Tool, ToolExecuteMessage, ToolResultMessage, ToolSyntax};
