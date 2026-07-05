@@ -144,6 +144,7 @@ impl LlmActor {
         _tool_runtime: &Arc<Mutex<ToolRuntime>>,
     ) -> Result<(String, Vec<serde_json::Value>, StreamSignal), crate::error::LlmError> {
         let mut full_response = String::new();
+        let mut reasoning_response = String::new();
         let mut stream = response.bytes_stream();
         let mut rx_chars: usize = 0;
         let mut tool_calls: Vec<serde_json::Value> = Vec::new();
@@ -212,6 +213,7 @@ impl LlmActor {
                                             .with_type("LlmThinking")
                                             .with_stream_id(stream_id.to_string());
                                             let _ = bus.publish(&self.id(), chunk_msg).await;
+                                            reasoning_response.push_str(&text);
                                             // Reasoning loops are the most common failure
                                             // mode — feed them into the same detector.
                                             if loop_detector.push(&text).is_some() {
@@ -332,7 +334,21 @@ impl LlmActor {
         )
         .await;
 
-        Ok((full_response, state.tool_calls, signal))
+        // When the model got stuck in a reasoning loop, the triage path needs
+        // to see what was repeated — but full_response only has TextDelta.
+        // Merge accumulated reasoning into the payload so the agent's triage
+        // llm_call has the actual loop content to summarize.
+        let payload = if matches!(signal, StreamSignal::StuckLoop) && !reasoning_response.is_empty() {
+            if full_response.is_empty() {
+                format!("[reasoning]\n{}", reasoning_response)
+            } else {
+                format!("[output]\n{}\n\n[reasoning]\n{}", full_response, reasoning_response)
+            }
+        } else {
+            full_response
+        };
+
+        Ok((payload, state.tool_calls, signal))
     }
 
     async fn send_request(

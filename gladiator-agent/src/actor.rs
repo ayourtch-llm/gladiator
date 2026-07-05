@@ -167,13 +167,14 @@ impl AgentActor {
         if let Some(ref llm_cfg) = self.llm_config {
             let triage_prompt = format!(
                 "The coding agent's LLM appeared stuck ({reason}) and was interrupted.\n\n\
-                 Here is the partial output it managed to produce (may be empty):\n\
+                 Here is the accumulated output/reasoning that was repeating (truncated):\n\
                  \"\"\"\n{partial}\n\"\"\"\n\n\
-                 What was the model likely trying to do? What is the simplest, most concrete next \
-                 step it should take? Answer in 2-3 sentences max. If the partial output shows it \
-                 was repeating itself, point out exactly what the correct next action is.",
+                 The model was going in circles. Identify what it was stuck on, then state the \
+                 SINGLE most concrete next action it should take to make progress. \
+                 Be specific: name the file, the function, the exact change. \
+                 Answer in 2-3 sentences max.",
                 reason = reason,
-                partial = partial.chars().take(2000).collect::<String>(),
+                partial = partial.chars().take(4000).collect::<String>(),
             );
             match gladiator_llm::llm_call(llm_cfg, &triage_prompt).await {
                 Ok(guidance) => {
