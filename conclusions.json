@@ -186,5 +186,9 @@
   {
     "id": "49dd848a-32b0-4b08-80e2-b8d6e0b075c4",
     "text": "mcp-rlsp client.rs refactored: IO task via channels, lazy init (ensure_started on first tool call), wait_for_diagnostics after did_open (10s timeout), removed blocking wait_for_project_index from start(). MCP tool timeout bumped 10→30s in gladiator-tools/src/mcp.rs. All compile clean, tests pass. BUT running gladiator process still has old 10s binary — need user to restart gladiator so the 30s timeout takes effect. After restart, LSP tools should work: ensure_started spawns RA (no block), did_open+wait_for_diagnostics waits for file analysis, then LSP request within 30s budget."
+  },
+  {
+    "id": "6fb4152c-ed48-4b67-9145-876224411827",
+    "text": "mcp-rlsp LSP integration progress: main.rs now calls start() before serve(), spawning RA upfront. client.rs has IO task via channels, ensure_started lazy init fallback, drain_until_quiet(3s) after initialize to absorb indexing notification burst (1300+ messages), removed wait_for_diagnostics entirely — read_response handles interleaved notifications naturally. MCP tool timeout bumped 10→120s in gladiator-tools/src/mcp.rs. RA stderr set to inherit for debugging. All LSP queries still return null/empty results even after draining — root cause unknown, possibly needs workspace_folders or longer indexing wait. Build clean, tests pass."
   }
 ]
