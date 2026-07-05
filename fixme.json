@@ -197,16 +197,16 @@
   {
     "id": "4e835d41-36ac-4891-b532-ca5e0dfb009b",
     "phrase": "vendor the ./tmp/open-strix-rust/mcp-pty-server",
-    "done": false
+    "done": true
   },
   {
     "id": "4539a588-cdb0-4cf4-a457-01f49eac0190",
     "phrase": "vendor the ./tmp/open-strix-rust/mcp-loader",
-    "done": false
+    "done": true
   },
   {
     "id": "68252ebe-80ee-479c-b4bb-bff636cd2669",
     "phrase": "vendor the ./tmp/open-strix-rust/mcp-pdf-server",
-    "done": false
+    "done": true
   }
 ]
