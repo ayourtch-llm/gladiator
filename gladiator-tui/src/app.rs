@@ -53,16 +53,16 @@ pub struct App {
     /// Instant when the current (or most recent) LLM request was sent — used
     /// to measure prefill duration and elapsed time for the status display.
     request_start: Option<Instant>,
-    /// History of past prefill durations paired with their input-token counts,
-    /// so we can estimate how long future requests will take. Stored as
-    /// (duration_secs, input_tokens). Most recent first is not required — we
-    /// average over all entries.
+    /// History of past prefill samples as (input_tokens, duration_ms).
+    /// Used to fit a degree-5 polynomial predicting prefill time from token count.
     prefill_history: Vec<(u64, u64)>,
     /// Input tokens for the *current* request if known yet; populated from the
-    /// most-recent StreamStats usage.input_tokens (which reflects the last
-    /// turn's actual input size). Used as a proxy for "new information" in this
-    /// request until fresh stats arrive.
+    /// most-recent StreamStats usage.input_tokens. Used as a proxy for current
+    /// request size until fresh stats arrive.
     current_request_input_tokens: Option<u64>,
+    /// Duration in ms of the prefill phase that just ended (first token arrived).
+    /// Paired with input_tokens when StreamStats arrives, then pushed to history.
+    pending_prefill_ms: Option<u64>,
 
     // --- Up/Down navigation mode stickiness ---
     /// When true, plain Up/Down are interpreted as history navigation even if
@@ -106,6 +106,7 @@ impl App {
             request_start: None,
             prefill_history: Vec::new(),
             current_request_input_tokens: None,
+            pending_prefill_ms: None,
             up_down_history_mode: false,
             retract_requested: false,
         }
@@ -160,6 +161,7 @@ impl App {
         self.prefill_history.clear();
         self.current_request_input_tokens = None;
         self.request_start = None;
+        self.pending_prefill_ms = None;
     }
 
     /// Advance the spinner frame if busy and ~100ms have elapsed since last advance.
@@ -178,56 +180,49 @@ impl App {
         }
     }
 
-    /// Estimate remaining seconds for the current prefill phase based on
-    /// historical (duration, input_tokens) pairs. Returns None if there's
-    /// insufficient history to estimate.
+    /// Estimate total prefill duration in seconds for the current request,
+    /// using a degree-5 polynomial least-squares fit over past samples of
+    /// (input_tokens, duration_ms). Returns None if insufficient data.
     ///
-    /// Algorithm: compute a simple linear ratio from past samples —
-    /// `estimated_total = avg(duration / tokens) * current_tokens`. If we have
-    /// elapsed time already and it exceeds the estimate by > 2x, assume cache
-    /// was cold (cache-miss fallback): re-baseline using only this request's
-    /// own ratio once known. For now while in-flight with no history for THIS
-    /// request yet, just use past averages.
+    /// Falls back to linear interpolation when fewer than 2 samples exist.
+    /// Cache-miss fallback: if elapsed already exceeds 3× the estimate,
+    /// return None so only elapsed time is shown instead of a misleading ETA.
     fn estimated_prefill_total_secs(&self) -> Option<u64> {
-        if self.prefill_history.is_empty() {
+        let current_tokens = self.current_request_input_tokens.unwrap_or(0);
+        // If we don't know token count yet, fall back to average duration.
+        if current_tokens == 0 && !self.prefill_history.is_empty() {
+            let avg_ms: f64 =
+                self.prefill_history.iter().map(|(_, d)| *d as f64).sum::<f64>()
+                    / self.prefill_history.len() as f64;
+            return Some((avg_ms / 1000.0).max(1.0) as u64);
+        }
+        if current_tokens == 0 {
             return None;
         }
-        let current_tokens = self.current_request_input_tokens.unwrap_or(0);
-        // If we don't know the token count for this request yet, fall back to
-        // averaging past durations directly.
-        if current_tokens == 0 {
-            let avg_dur: f64 =
-                self.prefill_history.iter().map(|(d, _)| *d as f64).sum::<f64>()
-                    / self.prefill_history.len() as f64;
-            return Some(avg_dur.max(1.0) as u64);
-        }
-        // Compute average seconds-per-token from history (only samples with
-        // non-zero tokens contribute).
-        let ratios: Vec<f64> = self
+
+        let samples: Vec<(f64, f64)> = self
             .prefill_history
             .iter()
-            .filter(|(_, t)| *t > 0)
-            .map(|(d, t)| *d as f64 / *t as f64)
+            .filter(|(_, d)| *d > 0)
+            .map(|(t, d)| (*t as f64, *d as f64))
             .collect();
-        if ratios.is_empty() {
-            // All history has zero tokens — just average durations.
-            let avg_dur: f64 =
-                self.prefill_history.iter().map(|(d, _)| *d as f64).sum::<f64>()
-                    / self.prefill_history.len() as f64;
-            return Some(avg_dur.max(1.0) as u64);
+        if samples.is_empty() {
+            return None;
         }
-        let avg_ratio: f64 = ratios.iter().sum::<f64>() / ratios.len() as f64;
-        let est_total = (avg_ratio * current_tokens as f64).max(1.0);
-        // Cache-miss fallback: if elapsed already exceeds 2× the estimate,
-        // treat this request as a cold-cache baseline — return None so we
+
+        // Fit polynomial of degree min(5, n-1) via least squares.
+        let est_ms = fit_polynomial_predict(&samples, current_tokens as f64);
+        let est_secs = (est_ms / 1000.0).max(1.0);
+
+        // Cache-miss fallback: if elapsed already exceeds 3× estimate,
         // show only elapsed time rather than a misleading ETA.
         if let Some(start) = self.request_start {
             let elapsed = start.elapsed().as_secs_f64();
-            if est_total > 0.0 && elapsed > est_total * 2.0 {
+            if est_secs > 0.0 && elapsed > est_secs * 3.0 {
                 return None;
             }
         }
-        Some(est_total as u64)
+        Some(est_secs as u64)
     }
 
     /// Status string with spinner prefix when busy.
@@ -588,16 +583,14 @@ impl App {
                     self.stream_rx_chars = 0;
                 }
                 // On the transition prefill → first token, record how long
-                // the prefill phase took so we can estimate future requests.
+                // the prefill phase took in ms. We stash it as pending and pair
+                // it with input_tokens when StreamStats arrives (StreamStats comes
+                // after streaming ends, so this correctly pairs duration of THIS
+                // request with its own token count).
                 if self.is_prefill {
                     if let Some(start) = self.request_start.take() {
-                        let dur_secs = start.elapsed().as_secs();
-                        let input_tok = self.current_request_input_tokens.unwrap_or(0);
-                        self.prefill_history.push((dur_secs, input_tok));
-                        // Keep history bounded to avoid unbounded growth.
-                        if self.prefill_history.len() > 20 {
-                            self.prefill_history.remove(0);
-                        }
+                        let dur_ms = start.elapsed().as_millis() as u64;
+                        self.pending_prefill_ms = Some(dur_ms);
                     }
                 }
                 self.is_busy = true;
@@ -626,6 +619,15 @@ impl App {
             // Remember the most recent input-token count for ETA estimation.
             if let Some(tok) = input_tok {
                 self.current_request_input_tokens = Some(tok);
+                // If we have a pending prefill duration from this request's
+                // first-token transition, pair it with the actual token count
+                // and push to history. This correctly pairs (tokens, ms).
+                if let Some(dur_ms) = self.pending_prefill_ms.take() {
+                    self.prefill_history.push((tok, dur_ms));
+                    if self.prefill_history.len() > 50 {
+                        self.prefill_history.remove(0);
+                    }
+                }
             }
             self.ctx_window = msg
                 .payload
@@ -992,6 +994,137 @@ impl App {
     }
 }
 
+/// Fit a least-squares polynomial of degree min(5, n-1) through samples
+/// (x=tokens, y=duration_ms), normalized to avoid overflow in high powers.
+/// Returns predicted duration_ms at `query_x`.
+fn fit_polynomial_predict(samples: &[(f64, f64)], query_x: f64) -> f64 {
+    let n = samples.len();
+    if n == 0 {
+        return 0.0;
+    }
+    // Linear fallback for small sample sets.
+    if n < 2 {
+        return samples[0].1.max(1.0);
+    }
+
+    // Normalize x by dividing by max_x so powers stay in [0, ~1].
+    let max_x = samples.iter().map(|(x, _)| *x).fold(0.0_f64, f64::max);
+    if max_x <= 0.0 {
+        return samples[0].1.max(1.0);
+    }
+
+    // Degree capped at min(5, n-1) — need at least degree+1 points to fit.
+    let d = 5usize.min(n - 1).min(samples.len().saturating_sub(1));
+    if d == 0 {
+        return samples[0].1.max(1.0);
+    }
+
+    // Build normal equations: A β = b where
+    // A[i][j] = Σ u_k^(i+j), b[j] = Σ y_k * u_j^k, for i,j in 0..=d.
+    let sz = d + 1;
+    let mut a = vec![vec![0.0_f64; sz]; sz];
+    let mut b = vec![0.0_f64; sz];
+
+    for &(x, y) in samples {
+        let u = x / max_x;
+        // Precompute powers up to 2*d.
+        let mut pows = vec![1.0_f64; 2 * d + 1];
+        for i in 1..=(2 * d) {
+            pows[i] = pows[i - 1] * u;
+        }
+        for j in 0..sz {
+            b[j] += y * pows[j];
+            for i in 0..sz {
+                a[i][j] += pows[i + j];
+            }
+        }
+    }
+
+    // Solve via Gaussian elimination with partial pivoting.
+    let coeffs = match solve_linear_system(&mut a, &b) {
+        Some(c) => c,
+        None => return samples[0].1.max(1.0),
+    };
+
+    // Evaluate polynomial at normalized query point using Horner's method:
+    // f(u) = c_0 + u*(c_1 + u*(... ))
+    let qu = if max_x > 0.0 { query_x / max_x } else { 0.0 };
+    let mut result = 0.0_f64;
+    for &c in coeffs.iter().rev() {
+        result = result * qu + c;
+    }
+
+    // Clamp to non-negative — prefill time can't be negative.
+    if result < 1.0 || !result.is_finite() {
+        return samples[0].1.max(1.0);
+    }
+    result
+}
+
+/// Solve a linear system A x = b via Gaussian elimination with partial pivoting.
+/// Modifies `a` in place (augments with b column). Returns solution or None if singular.
+fn solve_linear_system(a: &mut [Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
+    let n = a.len();
+    if n == 0 || a.iter().any(|row| row.len() != n) {
+        return None;
+    }
+
+    // Augmented matrix [A | b]
+    for i in 0..n {
+        a[i].push(b[i]);
+    }
+    let ncols = n + 1;
+
+    // Forward elimination with partial pivoting.
+    for col in 0..n.saturating_sub(1) {
+        // Find pivot row (max absolute value in column).
+        let mut max_row = col;
+        let mut max_val = a[col][col].abs();
+        for r in (col + 1)..n {
+            if a[r][col].abs() > max_val {
+                max_val = a[r][col].abs();
+                max_row = r;
+            }
+        }
+
+        // Swap rows.
+        if max_row != col {
+            a.swap(col, max_row);
+        }
+
+        let pivot = a[col][col];
+        if pivot.abs() < 1e-12 {
+            return None; // Singular matrix
+        }
+
+        for r in (col + 1)..n {
+            let factor = a[r][col] / pivot;
+            for c in col..ncols {
+                a[r][c] -= factor * a[col][c];
+            }
+        }
+    }
+
+    // Back substitution.
+    if n == 0 || a[n - 1][n - 1].abs() < 1e-12 {
+        return None;
+    }
+
+    let mut x = vec![0.0_f64; n];
+    for i in (0..n).rev() {
+        let mut sum = a[i][ncols - 1]; // augmented column
+        for j in (i + 1)..n {
+            sum -= a[i][j] * x[j];
+        }
+        if a[i][i].abs() < 1e-12 {
+            return None;
+        }
+        x[i] = sum / a[i][i];
+    }
+
+    Some(x)
+}
+
 /// Run the TUI app with the bus, reading user input and bus messages concurrently.
 /// The user_input_tx channel sends user input text to the agent.
 pub async fn run_app(
@@ -1236,3 +1369,88 @@ fn strip_tool_result_header(content: &str) -> String {
     }
     content.to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn polynomial_predict_linear_data() {
+        // Perfect linear relationship: ms = 2 * tokens
+        let samples = vec![
+            (100.0, 200.0),
+            (500.0, 1000.0),
+            (1000.0, 2000.0),
+            (2000.0, 4000.0),
+            (3000.0, 6000.0),
+            (5000.0, 10000.0),
+        ];
+        // With degree-1 fit through linear data, prediction should be exact.
+        let pred = fit_polynomial_predict(&samples, 2500.0);
+        assert!((pred - 5000.0).abs() < 50.0,
+            "expected ~5000ms for 2500 tokens, got {}", pred);
+
+        // Edge: zero query
+        let _p0 = fit_polynomial_predict(&samples, 0.0);
+    }
+
+    #[test]
+    fn polynomial_predict_empty_samples() {
+        assert_eq!(fit_polynomial_predict(&[], 100.0), 0.0);
+    }
+
+    #[test]
+    fn polynomial_predict_single_sample() {
+        let samples = vec![(500.0, 800.0)];
+        // Single sample: should return the single y value
+        assert_eq!(fit_polynomial_predict(&samples, 300.0), 800.0_f64.max(1.0));
+    }
+
+    #[test]
+    fn polynomial_predict_two_samples_linear() {
+        let samples = vec![(100.0, 200.0), (500.0, 600.0)];
+        // Two points: degree-1 linear fit should interpolate exactly.
+        let pred = fit_polynomial_predict(&samples, 300.0);
+        assert!((pred - 400.0).abs() < 10.0,
+            "expected ~400ms for 300 tokens (linear interp), got {}", pred);
+    }
+
+    #[test]
+    fn polynomial_predict_six_samples_degree5() {
+        // Cubic relationship: ms = 3 * t^2 + small noise
+        let samples: Vec<(f64, f64)> = vec![
+            (100.0, 30000.0),
+            (200.0, 120000.0),
+            (400.0, 480000.0),
+            (800.0, 1920000.0),
+            (1600.0, 7680000.0),
+            (3200.0, 30720000.0),
+        ];
+        // With degree-5 fit on perfectly quadratic data, prediction should
+        // be close to the true value at an intermediate point.
+        let pred = fit_polynomial_predict(&samples, 600.0);
+        assert!(pred > 500_000.0 && pred < 1_200_000.0,
+            "expected ~108000ms for 600 tokens (quadratic), got {}", pred);
+    }
+
+    #[test]
+    fn solve_linear_system_basic() {
+        // Simple 2x2: x + y = 3, 2x - y = 6 => x=3, y=0
+        let mut a = vec![vec![1.0_f64, 1.0], vec![2.0, -1.0]];
+        let b = vec![3.0_f64, 6.0];
+        let result = solve_linear_system(&mut a, &b);
+        assert!(result.is_some());
+        let x = result.unwrap();
+        assert!((x[0] - 3.0).abs() < 1e-10, "expected x=3, got {}", x[0]);
+        assert!((x[1]).abs() < 1e-10, "expected y≈0, got {}", x[1]);
+    }
+
+    #[test]
+    fn solve_linear_system_singular() {
+        // Singular matrix (two identical rows)
+        let mut a = vec![vec![2.0_f64; 3], vec![2.0; 3]];
+        let b = vec![5.0_f64, 5.0];
+        assert!(solve_linear_system(&mut a, &b).is_none());
+    }
+}
+
