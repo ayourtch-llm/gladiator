@@ -577,6 +577,25 @@ impl App {
 
         // All other message types
         if let Some(app_msg) = bus_to_app_message(msg) {
+            // "Calling tool: <name>(<args>)" Info messages duplicate the
+            // already-rendered [tool] building-progress line. Replace it in
+            // place instead of appending a second line.
+            if msg_type == "Info"
+                && app_msg.content.starts_with("Calling tool:")
+                && self.chat.message_count() > 0
+            {
+                let last = self.chat.messages().last().unwrap();
+                if last.role == crate::state::AppMessageRole::Tool {
+                    // Preserve the diff rendering for edit_file/plan_edits:
+                    // only replace when the [tool] line is a plain name(args)
+                    // form (no newline → no diff block).
+                    let content = app_msg.content.trim_start_matches("Calling tool: ").to_string();
+                    if !last.content.contains('\n') {
+                        self.chat.replace_last(content);
+                        return;
+                    }
+                }
+            }
             self.chat.add_message(app_msg);
             self.last_stream_type = None;
             self.last_tool_call_index = None;
