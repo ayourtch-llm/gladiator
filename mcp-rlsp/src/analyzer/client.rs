@@ -146,16 +146,24 @@ impl RustAnalyzerClient {
     ///   Cycle 3+: file indexing (slow, reports "N/M" or crate paths)
     /// We wait until we see an "end" that follows progress reports containing
     /// "/" (indicating N/M counts), meaning actual file indexing completed.
-    /// Wait for rust-analyzer to finish ALL project loading + indexing by draining
-    /// $/progress notifications until a quiet period (no messages for N seconds).
-    /// RA sends multiple begin/report/end cycles: sysroot discovery, cargo metadata,
-    /// then file indexing per crate group. We must wait for ALL of them to complete
-    /// before querying — sending requests during active indexing returns null.
+    /// Wait for rust-analyzer to finish ALL project loading + indexing by tracking
+    /// $/progress begin/end tokens. Each progress cycle has a unique token (e.g.
+    /// "rustAnalyzer/Fetching", "rustAnalyzer/Roots Scanned"). We track outstanding
+    /// begun-but-not-ended tokens and wait until all have ended OR a quiet period
+    /// of no messages for N seconds after seeing at least one END. Also checks for
+    /// the `experimental/serverStatus` quiescent=true notification.
     async fn wait_for_indexing(&mut self) {
+        use std::collections::HashSet;
+        let mut active_tokens: HashSet<String> = HashSet::new();
         let mut end_count = 0u32;
-        // Quiet period: no messages for this long means indexing is done.
-        let quiet_duration = std::time::Duration::from_secs(3);
+        // Quiet period fallback: if no messages arrive for this long after seeing
+        // at least one END, assume indexing is done (some progress tokens never
+        // formally send an "end" — e.g. "Roots Scanned").
+        let quiet_duration = std::time::Duration::from_secs(10);
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(180);
+        // Count consecutive quiet periods with active tokens still outstanding.
+        // After 3 consecutive quiets (~30s of silence), treat remaining tokens as stale.
+        let mut consecutive_quiets_with_active = 0u32;
 
         loop {
             if tokio::time::Instant::now() >= deadline {
@@ -164,8 +172,7 @@ impl RustAnalyzerClient {
             }
             match self.receiver.as_mut() {
                 Some(rx) => {
-                    // Wait up to quiet_duration for the next message. If none arrives
-                    // within that window AND we've seen at least one END, indexing is done.
+                    // Wait up to quiet_duration for the next message.
                     match tokio::time::timeout(quiet_duration, rx.recv()).await {
                         Ok(Some(msg_val)) => {
                             let has_result = msg_val.get("result").is_some()
@@ -183,7 +190,26 @@ impl RustAnalyzerClient {
                                     .get("method")
                                     .and_then(|m| m.as_str())
                                     .unwrap_or("");
-                                if method == "$/progress" {
+                                // Check for experimental/serverStatus with quiescent=true —
+                                // this is RA's definitive "analysis settled" signal.
+                                if method == "experimental/serverStatus"
+                                    || method == "rust-analyzer/serverStatus"
+                                {
+                                    let quiescent = msg_val
+                                        .get("params")
+                                        .and_then(|p| p.get("quiescent"))
+                                        .and_then(|q| q.as_bool())
+                                        .unwrap_or(false);
+                                    if quiescent {
+                                        dbg_log("wait_for_indexing: serverStatus quiescent=true, ready");
+                                        return;
+                                    }
+                                } else if method == "$/progress" {
+                                    let params = msg_val.get("params").and_then(|p| p.as_object());
+                                    let token = params
+                                        .and_then(|p| p.get("token"))
+                                        .map(|t| t.to_string())
+                                        .unwrap_or_default();
                                     let value =
                                         msg_val.get("params").and_then(|p| p.get("value"));
                                     let kind =
@@ -192,27 +218,46 @@ impl RustAnalyzerClient {
                                         .and_then(|v| v.get("message"))
                                         .and_then(|m| m.as_str())
                                         .unwrap_or("");
-                                    if kind == "end" {
-                                        end_count += 1;
+                                    if kind == "begin" {
+                                        active_tokens.insert(token.clone());
                                         dbg_log(&format!(
-                                            "wait_for_indexing: END #{end_count} ({message})"
+                                            "wait_for_indexing: BEGIN ({token}) {message}"
+                                        ));
+                                    } else if kind == "end" {
+                                        end_count += 1;
+                                        active_tokens.remove(&token);
+                                        let remaining = active_tokens.len();
+                                        dbg_log(&format!(
+                                            "wait_for_indexing: END #{end_count} ({token}), {remaining} still active"
                                         ));
                                     } else if !message.is_empty() {
                                         let short = if message.len() > 60 { &message[..60] } else { message };
+                                        // Only log every ~20th report to avoid noise
                                         dbg_log(&format!("wait_for_indexing: {kind}: {short}"));
                                     }
                                 }
                             }
                         }
                         _ => {
-                            // No message within quiet_duration — indexing is done (if we saw any ENDs).
-                            if end_count > 0 {
+                            // No message within quiet_duration.
+                            if !active_tokens.is_empty() && end_count > 0 {
+                                consecutive_quiets_with_active += 1;
                                 dbg_log(&format!(
-                                    "wait_for_indexing: complete after {end_count} END events, channel quiet"
+                                    "wait_for_indexing: quiet #{} but {} tokens still active",
+                                    consecutive_quiets_with_active, active_tokens.len()
+                                ));
+                                // After 3 consecutive quiet periods (~30s of silence)
+                                // with no new messages, treat remaining tokens as stale.
+                                if consecutive_quiets_with_active >= 3 {
+                                    dbg_log("wait_for_indexing: proceeding after 3 quiets (stale tokens)");
+                                    return;
+                                }
+                            } else if end_count > 0 && active_tokens.is_empty() {
+                                dbg_log(&format!(
+                                    "wait_for_indexing: complete, {end_count} END events + all tokens ended"
                                 ));
                                 return;
                             }
-                            // If no ENDs yet either, keep waiting (up to deadline)
                         }
                     }
                 }
@@ -272,6 +317,44 @@ impl RustAnalyzerClient {
             "params": params
         });
         self.send_message(&msg).await
+    }
+
+    /// Send a request, and if result is null for semantic queries (definition,
+    /// references, workspace/symbol), wait briefly and retry up to 3 times.
+    /// RA returns null while still indexing — this handles the case where
+    /// wait_for_indexing returned early due to stale progress tokens.
+    async fn send_request_retry(&mut self, method: &str, params: Value) -> Result<Value> {
+        // Methods that return meaningful results (not null-as-valid-answer).
+        const RETRY_METHODS: &[&str] = &[
+            "textDocument/definition",
+            "textDocument/references",
+            "workspace/symbol",
+            "textDocument/documentSymbol",
+            "textDocument/codeAction",
+            "textDocument/prepareTypeHierarchy",
+        ];
+        let should_retry = RETRY_METHODS.contains(&method);
+
+        for attempt in 0..3 {
+            if attempt > 0 {
+                dbg_log(&format!("send_request_retry: retrying {method} (attempt {})", attempt + 1));
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+            let response = self.send_request(method, params.clone()).await?;
+            // If result is null and this is a semantic query that should return data,
+            // retry — RA may still be indexing.
+            if !should_retry {
+                return Ok(response);
+            }
+            let result_is_null = response.get("result").map(|r| r.is_null()).unwrap_or(true)
+                && response.get("error").is_none();
+            if !result_is_null {
+                return Ok(response);
+            }
+            dbg_log(&format!("send_request_retry: {method} returned null (attempt {})", attempt + 1));
+        }
+        // Return the last (null) result after exhausting retries.
+        self.send_request(method, params).await
     }
 
     /// Send a request and read the matching response (handling server requests/notifications).
@@ -434,7 +517,7 @@ impl RustAnalyzerClient {
         self.did_open(&abs).await?;
         let params = create_text_document_position_params(file_path, line, character);
         dbg_log(&format!("find_definition: sending textDocument/definition with params={params}"));
-        let response = self.send_request("textDocument/definition", params).await?;
+        let response = self.send_request_retry("textDocument/definition", params).await?;
         dbg_log(&format!("find_definition: raw response: {response}"));
         self.did_close(&abs).await?;
         Ok(format_definition_response(&response))
@@ -449,7 +532,7 @@ impl RustAnalyzerClient {
         self.did_open(&abs).await?;
         dbg_log("find_references: sending textDocument/references");
         let params = create_references_params(file_path, line, character);
-        let response = self.send_request("textDocument/references", params).await?;
+        let response = self.send_request_retry("textDocument/references", params).await?;
         dbg_log(&format!("find_references: raw response: {response}"));
         self.did_close(&abs).await?;
         Ok(format_references_response(&response))
@@ -466,7 +549,7 @@ impl RustAnalyzerClient {
         }
         
         let params = create_workspace_symbol_params(query);
-        let response = self.send_request("workspace/symbol", params).await?;
+        let response = self.send_request_retry("workspace/symbol", params).await?;
         Ok(format_workspace_symbols_response(&response))
     }
 
@@ -491,7 +574,7 @@ impl RustAnalyzerClient {
         // pending diagnostics notifications from the server's queue. We discard them;
         // for richer output use `cargo check` via bash.
         let params = create_text_document_position_params(file_path, 0, 0);
-        let response = self.send_request("textDocument/definition", params).await?;
+        let response = self.send_request_retry("textDocument/definition", params).await?;
         // Close the doc so we don't keep it open in rust-analyzer's memory.
         self.did_close(&abs).await?;
 
@@ -517,7 +600,7 @@ impl RustAnalyzerClient {
             &["refactor.extract.function"],
         );
 
-        let response = self.send_request("textDocument/codeAction", params).await?;
+        let response = self.send_request_retry("textDocument/codeAction", params).await?;
         dbg_log(&format!("extract_function: raw codeAction response: {response}"));
         let action = pick_first_command(&response)
             .ok_or_else(|| anyhow!("No extract function code action available for the given range"))?;
@@ -541,7 +624,7 @@ impl RustAnalyzerClient {
         // Zero-length range at the call site; rust-analyzer matches refactor.inline
         // when the cursor is on a function call.
         let params = create_code_action_position_params(file_path, line, character);
-        let response = self.send_request("textDocument/codeAction", params).await?;
+        let response = self.send_request_retry("textDocument/codeAction", params).await?;
         dbg_log(&format!("inline_function: raw codeAction response: {response}"));
         let action = pick_first_command(&response)
             .ok_or_else(|| anyhow!("No inline code action available at the given position"))?;
@@ -577,7 +660,7 @@ impl RustAnalyzerClient {
             &["source.organizeImports"],
         );
 
-        let response = self.send_request("textDocument/codeAction", params).await?;
+        let response = self.send_request_retry("textDocument/codeAction", params).await?;
         dbg_log(&format!("organize_imports (filtered) raw: {response}"));
         let action = pick_first_command(&response);
 
@@ -586,7 +669,7 @@ impl RustAnalyzerClient {
             Some(a) => Some(a),
             None => {
                 let params2 = create_code_action_params(file_path, full_range.clone(), &[]);
-                let response2 = self.send_request("textDocument/codeAction", params2).await?;
+                let response2 = self.send_request_retry("textDocument/codeAction", params2).await?;
                 dbg_log(&format!("organize_imports (unfiltered) raw: {response2}"));
                 pick_first_command_with_kind(&response2, "source.organizeImports")
             }
@@ -611,7 +694,7 @@ impl RustAnalyzerClient {
 
         // prepareTypeHierarchy returns an array of TypeHierarchyItems; we then request supertypes.
         let prep_params = prepare_type_hierarchy_params(file_path, line, character);
-        let response = self.send_request("textDocument/prepareTypeHierarchy", prep_params).await?;
+        let response = self.send_request_retry("textDocument/prepareTypeHierarchy", prep_params).await?;
         dbg_log(&format!("get_type_hierarchy: raw prepare response: {response}"));
         // RA may return null (cursor not on a type) or an array.
         let result_val = response.get("result").unwrap_or(&Value::Null);
