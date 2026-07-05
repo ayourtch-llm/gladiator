@@ -54,6 +54,7 @@ write = true
 edit = true
 glob = true
 grep = true
+web_fetch = true
 
 [tools.sandbox]
 enabled = false

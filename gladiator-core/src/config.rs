@@ -362,7 +362,7 @@ pub struct ToolsConfig {
     pub fixme: bool,
     #[serde(default = "default_tool_on")]
     pub conclusions: bool,
-    /// Enable the web_fetch built-in tool (HTTP fetch + HTML-to-text).
+    /// Enable the web_fetch built-in tool (HTTP fetch + HTML→Markdown/text, large-response caching).
     #[serde(default = "default_tool_off")]
     pub web_fetch: bool,
     #[serde(default)]
