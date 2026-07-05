@@ -90,6 +90,14 @@ impl App {
         self.status = status.into();
     }
 
+    /// Force-stop the spinner (e.g. after a user interrupt) so it does not
+    /// keep spinning until an LlmStreamEnd bus message arrives.
+    pub fn stop_spinner(&mut self) {
+        self.is_busy = false;
+        self.spinner_frame = 0;
+        self.last_spinner_advance = None;
+    }
+
     /// Advance the spinner frame if busy and ~100ms have elapsed since last advance.
     pub fn tick_spinner(&mut self) {
         if !self.is_busy {
@@ -768,6 +776,7 @@ pub async fn run_app(
                                 let _ = bus.publish("gladiator-tui", msg).await;
                                 app.chat_mut().add_message(AppMessage::system("Stopping inference..."));
                                 app.scroll_mut().scroll_to_bottom();
+                                app.stop_spinner();
                                 app.set_status("Interrupt sent");
                                 last_esc_time = None;
                             } else {
