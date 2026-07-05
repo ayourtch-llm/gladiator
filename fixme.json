@@ -147,7 +147,7 @@
   {
     "id": "970e44c1-b7f8-4448-9013-68778e446207",
     "phrase": "read tmp/editing.txt and implement a worksspace member mcp-tagged-fileops which would implement the ideas from there.",
-    "done": false
+    "done": true
   },
   {
     "id": "73fa5fb0-6263-4a2b-a619-6000244cb632",
