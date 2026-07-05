@@ -1,0 +1,97 @@
+[
+  {
+    "id": "8032f94c-64a2-4271-a515-e1699a8ef406",
+    "phrase": "add a built-in tool get_pending_user_messages which would return the pending user messages and clear it. also, just before submitting the results of the tool calls to the llm, check if there are pending user messages - and if there are - insert the synthetic tool call into the tool_calls array in that turn, and the corresponding tool call result, and clear the pending messages array. Also, when returning a normal assistant reply, before yielding, check if the user message can be populated from pending messages, and if so - then take it from there and clear that accumulator before kicking off the turn.",
+    "done": true
+  },
+  {
+    "id": "7f9ee338-d7f7-4675-965e-6d13f4949c50",
+    "phrase": "need to have up/down to move one line up and one line down in the multiline editor input, even if these multilines are due to wrapping of the editor. no need to have surgical precision but just to be able to move visually up and down. If the editor is single line only - the up and down should function as history prev/next navigation.",
+    "done": true
+  },
+  {
+    "id": "6ccf9bf8-7481-4c88-b2f6-f8ba5a4ef14a",
+    "phrase": "add a display of the pending messages that would show just above the editor, so the user has the indication when the message gets drained ? (and when it gets drained, it should be inserted into the tty stream)",
+    "done": true
+  },
+  {
+    "id": "fb0f4313-9c3a-47ca-95db-46fb1f5c51ee",
+    "phrase": "implement the \"todo\" tools",
+    "done": true
+  },
+  {
+    "id": "af7a9240-0893-414f-a461-c14df02985fa",
+    "phrase": "display the edit_file arguments in a form of a nicely formatted diff, and the same for plan_edits",
+    "done": true
+  },
+  {
+    "id": "e62ae81b-444d-43e1-a2e0-0e287745d771",
+    "phrase": "make the sandbox possible to turn off via config and/or user input /sandbox on|off",
+    "done": true
+  },
+  {
+    "id": "cbf06db9-0934-4ab7-a504-e1bb2ede8337",
+    "phrase": "pending messages should also trigger not only when the user message arrives during active tool calls, but also during the active LLM inference call",
+    "done": true
+  },
+  {
+    "id": "7ade5a2a-476e-4c94-8e56-34ed7f6dc9dc",
+    "phrase": "pending messages is 'off by one': first message just displays \"pending messages\", the second pending message makes the first pending message show under the \"pending messages\" title, etc.",
+    "done": true
+  },
+  {
+    "id": "1c88c4e1-6068-4ed5-bce5-1458c48b7f18",
+    "phrase": "implement a standalone llm-call actor, which would accept the provider id + instruction string and return a string of the result.",
+    "done": true
+  },
+  {
+    "id": "a1b2c3d4-0001-4000-8000-000000000001",
+    "phrase": "TUI: show an activity indicator (spinner) when there is an active LLM request in flight, so the user knows the agent is working and not frozen. Use braille spinner frames (like opencode: ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ at ~80ms) with a '⋯' fallback when animations are disabled. The agent already publishes LlmStream/LlmThinking events on the stream topic — drive the spinner off those (start on send_conversation, stop on LlmStreamEnd). Also show 'Calling tool: <name>' with the spinner during tool execution.",
+    "done": true
+  },
+  {
+    "id": "a1b2c3d4-0001-4000-8000-000000000002",
+    "phrase": "TUI: collapse long tool results instead of blasting them fully on screen. Show first ~3 lines (or ~10 for bash) then '…' with click-to-expand. See tmp/opencode/packages/tui/src/util/collapse-tool-output.ts for the reference algorithm (pure function: split by newlines, slice maxLines, append ellipsis, track overflow bool). Currently gladiator dumps the full tool result text into the chat stream which floods the display on large grep/cat outputs.",
+    "done": true
+  },
+  {
+    "id": "a1b2c3d4-0001-4000-8000-000000000003",
+    "phrase": "Stuck-model detection: if an LLM request has been streaming for longer than a threshold (e.g. 90s with no new chunk, or total thinking > 3 min), interrupt it (the control topic interrupt mechanism already exists), take the accumulated reasoning text, send it to the standalone llm-call actor with a prompt like 'Extract the key insights, decisions, and next actions from this thinking trace as a concise summary', then inject the summary back as a user message: \"Here is the useful information spotted from your thinking — see if it helps you progress.\" This turns infinite-think loops into productive pivots. Depends on the standalone llm-call actor fixme.",
+    "done": true
+  },
+  {
+    "id": "a1b2c3d4-0001-4000-8000-000000000004",
+    "phrase": "Graceful max-iterations recovery: when max_iterations is reached, instead of just stopping with a warning, the agent should (a) summarize what it accomplished so far and what remains, (b) save a handoff note via restart_from_file or at least record a conclusion, and (c) optionally auto-restart with a 'continue from where you left off' instruction. Currently it just prints 'Max iterations (50) reached' and goes idle, losing all momentum. Observed in supervisor session: gladiator spent all 50 iterations reading files and never wrote any code — the recovery should detect this exploration-only pattern and nudge toward action.",
+    "done": true
+  },
+  {
+    "id": "a1b2c3d4-0001-4000-8000-000000000005",
+    "phrase": "Add WebFetch and WebSearch tools. WebFetch: takes a URL + optional format (markdown/text/html), fetches it, converts to requested format, returns content (summarize if very large). WebSearch: takes a query, returns results. Look at how opencode (tmp/opencode) and open-strix (tmp/open-strix) implement these — opencode has a webfetch tool in its tool registry. Pick a dependency or hand-roll with reqwest (already in the workspace) + a simple HTML-to-markdown converter. Register as built-in tools behind config toggles. The agent currently cannot look up docs/APIs online, which causes it to guess at crate APIs (observed: stuck guessing the similar crate API in a loop).",
+    "done": true
+  },
+  {
+    "id": "80e77c4f-2060-4801-a6d4-9565ebdbeb9e",
+    "phrase": "we need to show in the TUI the current context taken up by the text. obviously it will need to reset whenever the session is being restarted from file.",
+    "done": true
+  },
+  {
+    "id": "f92bf118-6cf1-4f5d-a8bb-1815bb3c1756",
+    "phrase": "need to add a WebFetch tool - see how opencode has implemented it (./tmp/opencode)",
+    "done": true
+  },
+  {
+    "id": "eda3587a-86be-40e4-a8f8-a83022de31d3",
+    "phrase": "the interrupt by esc does not stop the spinner in the bottom line - this should be fixed",
+    "done": true
+  },
+  {
+    "id": "6ebe12cd-bf74-4e9d-9542-ab8ebade4258",
+    "phrase": "in the tool call output inside the TUI - we can replace the \"[tool] ...\" text by the \"Calling tool ..\" text since the successful parsing of the former always results in the latter.",
+    "done": false
+  },
+  {
+    "id": "233ff5b0-e1cf-4180-ac54-724db7fac1ad",
+    "phrase": "the \"Working...\" indicator starts showing only when the LLM starts outputting its content, wrongly resulting in the 'gladiator ready' during the message prefill phase, which can be long. Maybe that phase needs to be some different busy message, but with timer/progress spinner as well.",
+    "done": false
+  }
+]

@@ -38,6 +38,10 @@ pub struct App {
     spinner_frame: usize,
     last_spinner_advance: Option<Instant>,
     stream_rx_chars: usize,
+    /// Last reported input-token count from StreamStats (for context display).
+    ctx_used_tokens: Option<u64>,
+    /// Model context window in tokens, when known.
+    ctx_window: Option<usize>,
 }
 
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -59,6 +63,8 @@ impl App {
             spinner_frame: 0,
             last_spinner_advance: None,
             stream_rx_chars: 0,
+            ctx_used_tokens: None,
+            ctx_window: None,
         }
     }
 
@@ -98,6 +104,13 @@ impl App {
         self.last_spinner_advance = None;
     }
 
+    /// Reset context-usage tracking. Called when the session is restarted
+    /// from file (or otherwise reset), so stale token counts don't linger.
+    pub fn reset_context_usage(&mut self) {
+        self.ctx_used_tokens = None;
+        self.ctx_window = None;
+    }
+
     /// Advance the spinner frame if busy and ~100ms have elapsed since last advance.
     pub fn tick_spinner(&mut self) {
         if !self.is_busy {
@@ -116,10 +129,22 @@ impl App {
 
     /// Status string with spinner prefix when busy.
     pub fn display_status(&self) -> String {
+        let ctx_part = match (self.ctx_used_tokens, self.ctx_window) {
+            (Some(used), Some(win)) if win > 0 => {
+                let pct = ((used as f64 / win as f64 * 100.0).min(100.0)) as u64;
+                format!(" | ctx {}/{} {}%", used, win, pct)
+            }
+            (Some(used), None) => format!(" | ctx {} tok", used),
+            _ => String::new(),
+        };
         if self.is_busy {
-            format!("{} Working...   {} chars", SPINNER_FRAMES[self.spinner_frame], self.stream_rx_chars)
+            format!(
+                "{} Working...   {} chars{}",
+                SPINNER_FRAMES[self.spinner_frame], self.stream_rx_chars, ctx_part
+            )
         } else {
-            self.status.clone()
+            let base = self.status.clone();
+            if ctx_part.is_empty() { base } else { format!("{} |{}", base, ctx_part) }
         }
     }
 
@@ -379,6 +404,20 @@ impl App {
             _ => {}
         }
 
+        // Capture context-usage stats from StreamStats (before the noise filter
+        // drops them) so we can show "ctx: N/M tok" in the status bar.
+        if msg_type == "StreamStats" {
+            let usage = msg.payload.get("usage");
+            self.ctx_used_tokens = usage
+                .and_then(|u| u.get("input_tokens"))
+                .and_then(|v| v.as_u64());
+            self.ctx_window = msg
+                .payload
+                .get("context_window")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize);
+        }
+
         // Filter out noise types
         if matches!(
             msg_type.as_str(),
@@ -427,6 +466,7 @@ impl App {
             self.pending_messages.clear();
             self.last_stream_type = None;
             self.last_tool_call_index = None;
+            self.reset_context_usage();
             if let Some(messages) = msg.payload.get("messages").and_then(|m| m.as_array()) {
                 for replay_msg in messages {
                     self.replay_message_to_app(replay_msg);
