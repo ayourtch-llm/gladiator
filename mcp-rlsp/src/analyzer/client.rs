@@ -172,19 +172,41 @@ impl RustAnalyzerClient {
 
     async fn initialize(&mut self) -> Result<()> {
         let current_dir = std::env::current_dir()?;
-        let root_uri = format!("file://{}", current_dir.display());
-        // workspaceFolders is required by newer rust-analyzer versions.
-        // Format: [{ uri: "file:///path/to/project" }]
-        let workspace_folders = json!([{
-            "uri": &root_uri,
-            "name": current_dir.file_name().and_then(|n| n.to_str()).unwrap_or("workspace")
-        }]);
+        // Rust-analyzer can't handle workspaces with "." as a member (virtual
+        // manifest confusion). Instead, discover individual crate dirs from the
+        // workspace Cargo.toml and pass them as separate workspaceFolders.
+        let folders = discover_crate_folders(&current_dir);
+        dbg_log(&format!("discover_crate_folders: CWD={}, found {} folders: {:?}",
+            current_dir.display(), folders.len(),
+            folders.iter().take(5).map(|f| f.to_string()).collect::<Vec<_>>()));
+        let root_uri = if !folders.is_empty() {
+            // Use first crate dir as rootUri; all crates are still accessible via workspaceFolders.
+            format!("file://{}", folders[0])
+        } else {
+            format!("file://{}", current_dir.display())
+        };
+
+        let ws_folders: Vec<Value> = if !folders.is_empty() {
+            folders.iter().map(|p| {
+                let name = std::path::Path::new(p)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("workspace");
+                json!({ "uri": format!("file://{p}"), "name": name })
+            }).collect::<Vec<_>>()
+        } else {
+            let fallback = current_dir.display().to_string();
+            vec![json!({
+                "uri": format!("file://{fallback}"),
+                "name": current_dir.file_name().and_then(|n| n.to_str()).unwrap_or("workspace")
+            })]
+        };
 
         let init_params = json!({
             "processId": null,
             "clientInfo": { "name": "rust-mcp-server", "version": "0.1.0" },
             "rootUri": root_uri,
-            "workspaceFolders": workspace_folders,
+            "workspaceFolders": ws_folders,
             "capabilities": {
                 "window": { "workDoneProgress": true },
                 "textDocument": {
@@ -855,6 +877,68 @@ mod pos_to_index_tests {
         assert!(after.contains("let service = server.serve(stdio()).await?"));
 
         let _ = std::fs::remove_file(&path);
+    }
+}
+
+/// Discover individual crate directories from the workspace Cargo.toml.
+/// Rust-analyzer can't handle workspaces with "." as a member, so we walk up
+/// to find the workspace root, parse members (excluding ".") and return paths
+/// to each subdirectory that has both a Cargo.toml. Falls back to [current_dir]
+/// if no workspace manifest is found.
+fn discover_crate_folders(current_dir: &std::path::Path) -> Vec<String> {
+    // Walk up to find the nearest Cargo.toml with [workspace].
+    let mut dir = current_dir.to_path_buf();
+    loop {
+        let cargo_toml = dir.join("Cargo.toml");
+        if std::fs::read_to_string(&cargo_toml)
+            .ok()
+            .map(|c| c.contains("[workspace]"))
+            .unwrap_or(false)
+        { break; }
+        match dir.parent() {
+            Some(p) => dir = p.to_path_buf(),
+            None => return vec![current_dir.display().to_string()],
+        }
+    }
+
+    let workspace_root = dir;
+    dbg_log(&format!("discover_crate_folders: workspace root={}", workspace_root.display()));
+    let content = std::fs::read_to_string(workspace_root.join("Cargo.toml"))
+        .unwrap_or_default();
+
+    // Parse `members = [...]` list, extracting quoted paths (excluding ".").
+    let mut folders = Vec::new();
+    let mut in_members = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if !in_members {
+            if trimmed.starts_with("members") && trimmed.contains('[') { in_members = true; }
+            else { continue; }
+        }
+
+        // Extract quoted strings from the members list.
+        let mut remaining = trimmed;
+        while let Some(start) = remaining.find('"') {
+            let after_start = &remaining[start + 1..];
+            if let Some(end_rel) = after_start.find('"') {
+                let member = &after_start[..end_rel];
+                if !member.is_empty() && member != "." {
+                    let path = workspace_root.join(member).display().to_string();
+                    if std::path::Path::new(&path).join("Cargo.toml").exists() {
+                        folders.push(path);
+                    }
+                }
+                remaining = &after_start[end_rel + 1..];
+            } else { break; }
+        }
+
+        if trimmed.contains(']') { break; }
+    }
+
+    if folders.is_empty() {
+        vec![current_dir.display().to_string()]
+    } else {
+        folders
     }
 }
 
