@@ -130,10 +130,19 @@ impl LlmActor {
         let mut tool_calls: Vec<serde_json::Value> = Vec::new();
         let mut state = StreamState::default();
         let stream_timeout = std::time::Duration::from_secs(config.stream_timeout_secs);
+        const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+        let mut last_activity = std::time::Instant::now();
 
         loop {
-            match tokio::time::timeout(stream_timeout, stream.next()).await {
+            let per_chunk = std::cmp::min(
+                stream_timeout,
+                IDLE_TIMEOUT
+                    .saturating_sub(last_activity.elapsed())
+                    .max(std::time::Duration::from_millis(1)),
+            );
+            match tokio::time::timeout(per_chunk, stream.next()).await {
                 Ok(Some(Ok(chunk))) => {
+                    last_activity = std::time::Instant::now();
                     debug!("[llm] received chunk of {} bytes", chunk.len());
                     let payloads = crate::framing::decode_sse_chunk(&chunk);
                     for payload in payloads {
@@ -241,6 +250,7 @@ impl LlmActor {
                 }
                 Ok(None) => break,
                 Err(_) => {
+                    let idle = last_activity.elapsed() >= IDLE_TIMEOUT;
                     self.publish_stream_end_and_stats(
                         bus,
                         stream_id,
@@ -249,6 +259,14 @@ impl LlmActor {
                         config.context_window,
                     )
                     .await;
+                    if idle {
+                        info!(
+                            "[llm] idle timeout (no tokens for {:?}); returning partial response ({} chars)",
+                            IDLE_TIMEOUT,
+                            full_response.len()
+                        );
+                        break;
+                    }
                     return Err(crate::error::LlmError::StreamInterrupted(
                         full_response.len(),
                         "stream timeout".to_string(),
