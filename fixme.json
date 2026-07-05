@@ -188,5 +188,10 @@
     "id": "f9e9b370-3104-4b99-98e9-09178072125a",
     "phrase": "store the input edit history across launches by maintaining ./tmp/history.json",
     "done": true
+  },
+  {
+    "id": "beaa7daa-970b-40e0-a332-382c98551667",
+    "phrase": "RA returns null for ALL LSP queries on this workspace — find_definition, documentSymbol, hover, workspace/symbol all return result:null. Works fine on standalone temp projects and minimal 1-crate workspaces in /tmp. Root cause is project-specific: possibly the virtual manifest with \".\" as a member alongside path-dependency subcrates confuses RA's project discovery (cargo metadata succeeds but RA never loads source files). Tried: workspaceFolders, linkedProjects via initializationOptions, rootPath+rootUri combo, 120s wait — all still null. Next approach to try: generate rust-project.json manually OR remove \".\" from workspace members and see if that fixes it. See mcp-rlsp/tests/lsp_integration_test.rs for diagnostic tests.\"",
+    "done": false
   }
 ]
