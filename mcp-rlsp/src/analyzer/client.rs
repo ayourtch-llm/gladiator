@@ -21,12 +21,10 @@ fn get_rust_analyzer_path() -> String {
 pub struct RustAnalyzerClient {
     request_id: u64,
     initialized: bool,
-    /// Send serialized JSON-RPC messages to the IO task for writing to RA's stdin.
     sender: Option<tokio::sync::mpsc::UnboundedSender<String>>,
-    /// Receive responses and server-initiated requests from the IO task reading RA's stdout.
-    receiver: Option<tokio::sync::mpsc::UnboundedReceiver<Value>>,
-    /// Set of file URIs already opened via did_open, to avoid duplicate DidOpenTextDocument errors.
+    receiver: Option<tokio::sync::mpsc::UnboundedReceiver<Value>>, 
     open_files: HashSet<String>,
+    linked_projects: Vec<String>,
 }
 
 impl Default for RustAnalyzerClient {
@@ -61,7 +59,7 @@ async fn read_one_message<R: AsyncBufReadExt + Unpin>(reader: &mut R) -> Result<
 impl RustAnalyzerClient {
     pub fn new() -> Self {
         Self { request_id: 0, initialized: false, sender: None, receiver: None,
-               open_files: HashSet::new() }
+               open_files: HashSet::new(), linked_projects: Vec::new() }
     }
 
     /// Lazy initialization — call start() if not yet initialized.
@@ -77,10 +75,51 @@ impl RustAnalyzerClient {
     /// Spawn rust-analyzer and start the IO task.
     pub async fn start(&mut self) -> Result<()> {
         let path = get_rust_analyzer_path();
+
+        // If CWD has a [workspace] Cargo.toml (with or without [package]),
+        // RA's project model gets confused by the dual manifest and returns null
+        // for all queries. Fix: generate rust-project.json from cargo metadata,
+        // pass it via linkedProjects, spawn RA in /tmp with rootUri=null so
+        // auto-discovery finds no Cargo.toml.
+        // When using rust-project.json, RA doesn't run cargo metadata at all — it
+        // loads projects directly from the JSON, bypassing the dual-manifest issue.
+        let current_dir = std::env::current_dir()?;
+        dbg_log(&format!("start: CWD={}", current_dir.display()));
+        let workspace_toml_path = current_dir.join("Cargo.toml");
+        // Detect any Cargo.toml with [workspace] — even if it also has [package],
+        // RA's project model gets confused by the dual manifest and returns null
+        // for all queries. Using rust-project.json bypasses cargo metadata entirely.
+        let is_workspace = workspace_toml_path.exists()
+            && std::fs::read_to_string(&workspace_toml_path)
+                .ok().map(|c| c.contains("[workspace]"))
+                .unwrap_or(false);
+
+        if is_workspace {
+            dbg_log("start: [workspace] detected, generating rust-project.json");
+            match self.generate_rust_project_json(&current_dir) {
+                Ok(json_path) => {
+                    self.linked_projects = vec![json_path];
+                    dbg_log(&format!("start: using linkedProjects=[{:?}]", &self.linked_projects));
+                }
+                Err(e) => {
+                    dbg_log(&format!("start: failed to generate rust-project.json: {e}, falling back"));
+                }
+            }
+        }
+
+        // Spawn RA in /tmp if we're using linkedProjects (so CWD has no Cargo.toml
+        // for auto-discovery). Otherwise use current_dir normally.
+        let ra_cwd = if !self.linked_projects.is_empty() {
+            "/tmp".to_string()
+        } else {
+            current_dir.display().to_string()
+        };
+        
         let mut child = tokio::process::Command::new(&path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
+            .current_dir(&ra_cwd)
             .spawn()?;
 
         let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
@@ -266,39 +305,172 @@ impl RustAnalyzerClient {
         }
     }
 
-    async fn initialize(&mut self) -> Result<()> {
-        let current_dir = std::env::current_dir()?;
-        // Use CWD as rootUri with no workspaceFolders. RA discovers the
-        // workspace automatically by walking up to find Cargo.toml.
-        // Passing individual crate dirs as workspaceFolders causes RA to walk
-        // up from each and get confused by the virtual manifest with "." member.
-        let root_uri = format!("file://{}", current_dir.display());
-        dbg_log(&format!("initialize: rootUri={root_uri} (no workspaceFolders)"));
+    /// Generate a rust-project.json file for the workspace by running `cargo metadata`
+    /// and converting it to RA's project model format. This bypasses cargo auto-discovery
+    /// entirely — when linkedProjects points at this JSON, RA loads projects from it
+    /// instead of discovering Cargo.toml files (which would find our virtual manifest).
+    fn generate_rust_project_json(&self, workspace_root: &std::path::Path) -> Result<String> {
+        // Run cargo metadata to get the full package graph.
+        let output = std::process::Command::new("cargo")
+            .arg("metadata")
+            .arg("--format-version=1")
+            .current_dir(workspace_root)
+            .output()
+            .map_err(|e| anyhow!("running cargo metadata: {e}"))?;
+        
+        if !output.status.success() {
+            return Err(anyhow!(
+                "cargo metadata failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
 
-        let init_params = json!({
-            "processId": null,
-            "clientInfo": { "name": "rust-mcp-server", "version": "0.1.0" },
-            "rootUri": root_uri,
-            "capabilities": {
-                "window": { "workDoneProgress": true },
-                "textDocument": {
-                    "synchronization": { "didOpen": true, "didChange": false, "willSave": false, "save": false },
-                    "definition": { "dynamicRegistration": false },
-                    "references": { "dynamicRegistration": false },
-                    "publishDiagnostics": { "relatedInformation": true },
-                    "codeAction": {
-                        "dynamicRegistration": false,
-                        "codeActionLiteralsSupport": true,
-                        "dataSupport": false
-                    }
-                },
-                "workspace": {
-                    "symbol": { "dynamicRegistration": false },
-                    "applyEdit": true,
-                    "typeHierarchy": { "dynamicRegistration": false }
+        let meta: Value = serde_json::from_slice(&output.stdout)?;
+        let packages = meta.get("packages")
+            .and_then(|p| p.as_array())
+            .ok_or_else(|| anyhow!("no packages in cargo metadata"))?;
+
+        // Identify local workspace members (source is null for path deps).
+        let mut crates: Vec<Value> = Vec::new();
+        let mut name_to_index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+        // Collect local packages (source is null for path deps, non-null for crates.io/git)
+        let mut local_pkgs: Vec<&Value> = Vec::new();
+        for pkg in packages {
+            if pkg.get("source").and_then(|s| s.as_str()).unwrap_or("") == "" {
+                local_pkgs.push(pkg);
+            }
+        }
+
+        // Assign index mapping
+        for (i, pkg) in local_pkgs.iter().enumerate() {
+            let name = pkg["name"].as_str().unwrap_or_default();
+            name_to_index.insert(name.to_string(), i);
+        }
+
+        // Second pass: build crate entries with deps.
+        for pkg in &local_pkgs {
+            let name_val = pkg.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            
+            // Find root_module (prefer lib target, then bin)
+            let targets = pkg.get("targets")
+                .and_then(|t| t.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let mut root_module: Option<String> = None;
+            for target in &targets {
+                let kinds = target.get("kind").and_then(|k| k.as_array()).cloned().unwrap_or_default();
+                if kinds.iter().any(|k| k == "lib") || (root_module.is_none() && !target["src_path"].is_null()) {
+                    root_module = Some(
+                        target.get("src_path")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("")
+                            .to_string()
+                    );
                 }
             }
+
+            // Build deps list — only local workspace dependencies
+            let mut crate_deps: Vec<Value> = Vec::new();
+            if let Some(deps) = pkg.get("dependencies").and_then(|d| d.as_array()) {
+                for dep in deps {
+                    let kind_val = dep.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+                    // Skip dev-dependencies
+                    if !kind_val.is_empty() && kind_val != "normal" { continue; }
+                    
+                    let dep_name = dep.get("name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("")
+                        .replace('-', "_");
+                    if let Some(&dep_idx) = name_to_index.get(
+                        &dep.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string()
+                    ) {
+                        crate_deps.push(json!({
+                            "crate": dep_idx,
+                            "name": dep_name,
+                        }));
+                    }
+                }
+            }
+
+            let edition_val = pkg.get("edition")
+                .and_then(|e| e.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "2024".to_string());
+
+            crates.push(json!({
+                "display_name": name_val,
+                "root_module": root_module.clone().unwrap_or_default(),
+                "edition": edition_val,
+                "deps": crate_deps,
+                "is_workspace_member": true,
+                "cfg": ["cfg(tarpaulin_include)"],
+            }));
+        }
+
+        let project_json = json!({
+            "sysroot": null,
+            "crates": crates,
         });
+
+        // Write to a temp file — must be named exactly "rust-project.json"
+        let project_dir = std::env::temp_dir().join("gladiator-ra");
+        std::fs::create_dir_all(&project_dir).ok();
+        let project_path = project_dir.join("rust-project.json");
+        std::fs::write(&project_path, serde_json::to_string_pretty(&project_json)?)
+            .map_err(|e| anyhow!("writing rust-project.json: {e}"))?;
+        
+        dbg_log(&format!(
+            "generate_rust_project_json: wrote {} crates to {:?}",
+            local_pkgs.len(),
+            project_path
+        ));
+        
+        Ok(project_path.display().to_string())
+    }
+
+    fn capabilities_json(&self) -> Value {
+        json!({
+            "window": { "workDoneProgress": true },
+            "textDocument": {
+                "synchronization": { "didOpen": true, "didChange": false, "willSave": false, "save": false },
+                "definition": { "dynamicRegistration": false },
+                "references": { "dynamicRegistration": false },
+                "publishDiagnostics": { "relatedInformation": true },
+                "codeAction": {
+                    "dynamicRegistration": false,
+                    "codeActionLiteralsSupport": true,
+                    "dataSupport": false
+                }
+            },
+            "workspace": {
+                "symbol": { "dynamicRegistration": false },
+                "applyEdit": true,
+                "typeHierarchy": { "dynamicRegistration": false }
+            }
+        })
+    }
+
+    async fn initialize(&mut self) -> Result<()> {
+        let init_params = if !self.linked_projects.is_empty() {
+            json!({
+                "processId": null,
+                "clientInfo": { "name": "rust-mcp-server", "version": "0.1.0" },
+                "rootUri": Value::Null,
+                "capabilities": self.capabilities_json(),
+                "initializationOptions": {
+                    "linkedProjects": self.linked_projects
+                }
+            })
+        } else {
+            let current_dir = std::env::current_dir()?;
+            json!({
+                "processId": null,
+                "clientInfo": { "name": "rust-mcp-server", "version": "0.1.0" },
+                "rootUri": format!("file://{}", current_dir.display()),
+                "capabilities": self.capabilities_json(),
+            })
+        };
 
         let _response = self.send_request("initialize", init_params).await?;
         dbg_log(&format!("initialize response capabilities keys: {:?}",
