@@ -202,5 +202,17 @@
   {
     "id": "82aa01a1-6cd6-4fe9-afab-40a32245bebe",
     "text": "Fixme 970e44c1: Create mcp-tagged-fileops MCP server implementing antirez's tag-based EDIT tool. Design from editing.txt: READ/SEARCH return lines as \"lineNum:tag content\" where tag is a short checksum (4 chars). Edit by specifying line+tag+new_content — CAS verification via tag match instead of verbatim old text. Saves tokens vs current edit_file which requires full old_content. Plan: new mcp-websearch-style standalone MCP server with tools: tagged_read, tagged_search, tagged_edit. CRC32 or hash-based tags per line."
+  },
+  {
+    "id": "c7a0cd4e-745b-47c4-bf96-8729af0dcae6",
+    "text": "Fixme 84a572b8 (prefill ETA polynomial prediction) implemented and committed. Replaced linear-ratio estimator with degree-5 least-squares polynomial fit in app.rs: fit_polynomial_predict() normalizes x by max_x, builds Vandermonde-based normal equations, solves via Gaussian elimination with partial pivoting. Samples stored as (input_tokens, duration_ms); pending_prefill_ms set on first-token transition then paired with StreamStats input_tokens for correct per-request pairing. 7 unit tests added (linear/quadratic/empty/single/singular). Cache-miss fallback: elapsed > 3× estimate → show only elapsed."
+  },
+  {
+    "id": "c7d4e014-096d-458b-a95f-fd9f9b365e94",
+    "text": "RA returns null for ALL LSP queries (find_definition, organize_imports codeAction, workspace/symbol) even on real workspace files with 10s+ waits after didOpen. Root cause likely: initialize params missing `workspaceFolders` field — RA 1.93.1 may require it instead of/in addition to rootUri. Also \"duplicate DidOpenTextDocument\" errors because find_definition calls did_open internally AND tests call it externally. Fix plan: (1) add workspaceFolders to initialize, (2) after did_open, wait for publishDiagnostics before sending the actual LSP request — this ensures RA has analyzed the file, (3) fix duplicate did_open by tracking open files and skipping if already opened."
+  },
+  {
+    "id": "34545c38-95c5-4174-bb71-e3597b2e30c6",
+    "text": "RA returns null for ALL LSP queries on our workspace (find_definition, documentSymbol, hover, workspace/symbol) but WORKS perfectly on a standalone temp project. cargo metadata succeeds with all 11 members found. RA initializes and reports correct capabilities including definitionProvider=true. The indexing progress shows only std library paths, never our source files — meaning RA discovers the project via cargo metadata but fails to load/index any of our actual .rs files. Root cause is NOT: timing (tested up to 120s), rootUri format (file:///path correct), workspaceFolders (added), missing capabilities (all present in init response). The issue appears specific to this workspace structure — possibly the virtual manifest with `\".\"` as a member, or edition=2024 path dependencies. Next step: try creating a minimal reproduction of just one crate from our project in isolation to narrow down what breaks RA."
   }
 ]

@@ -1,4 +1,5 @@
 /target
 /tmp/opencode
 /tmp
+.env
 gladiator.log

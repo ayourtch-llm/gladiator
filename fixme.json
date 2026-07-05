@@ -157,7 +157,7 @@
   {
     "id": "84a572b8-1c4b-4d79-bf02-5b84e66e7d07",
     "phrase": "The estimate for prefill (\"Thinking...\" phase) should use precise time intervals (milliseconds?) and have a better prediction model - the speed generatlly degrades with size, so it should keep a set of past samples, and use that to predict the polynomial of, say 5th degree, which would be used to predict the prefill time based on the current prefill size.",
-    "done": false
+    "done": true
   },
   {
     "id": "dec1dfd7-55ff-4827-a1ee-b04a7d9b7c94",

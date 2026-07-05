@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use serde_json::{Value, json};
+use std::collections::HashSet;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 
@@ -24,6 +25,8 @@ pub struct RustAnalyzerClient {
     sender: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     /// Receive responses and server-initiated requests from the IO task reading RA's stdout.
     receiver: Option<tokio::sync::mpsc::UnboundedReceiver<Value>>,
+    /// Set of file URIs already opened via did_open, to avoid duplicate DidOpenTextDocument errors.
+    open_files: HashSet<String>,
 }
 
 impl Default for RustAnalyzerClient {
@@ -57,7 +60,8 @@ async fn read_one_message<R: AsyncBufReadExt + Unpin>(reader: &mut R) -> Result<
 
 impl RustAnalyzerClient {
     pub fn new() -> Self {
-        Self { request_id: 0, initialized: false, sender: None, receiver: None }
+        Self { request_id: 0, initialized: false, sender: None, receiver: None,
+               open_files: HashSet::new() }
     }
 
     /// Lazy initialization — call start() if not yet initialized.
@@ -127,11 +131,8 @@ impl RustAnalyzerClient {
 
         // Child handle is owned by the IO task (moved into closure).
         self.initialize().await?;
-        // Drain RA's initial startup notification burst ($/progress,
-        // workDoneProgressCreate, etc.) until the channel goes quiet for 3s.
-        // This blocks start() — and thus ensure_started() / the first tool call —
-        // but prevents wait_for_diagnostics from drowning in indexing notifications.
-        self.drain_until_quiet(3).await;
+        // Don't block on project indexing — RA queues LSP requests during indexing
+        // and responds once ready. read_response() handles interleaved notifications.
         Ok(())
     }
 
@@ -172,11 +173,18 @@ impl RustAnalyzerClient {
     async fn initialize(&mut self) -> Result<()> {
         let current_dir = std::env::current_dir()?;
         let root_uri = format!("file://{}", current_dir.display());
+        // workspaceFolders is required by newer rust-analyzer versions.
+        // Format: [{ uri: "file:///path/to/project" }]
+        let workspace_folders = json!([{
+            "uri": &root_uri,
+            "name": current_dir.file_name().and_then(|n| n.to_str()).unwrap_or("workspace")
+        }]);
 
         let init_params = json!({
             "processId": null,
             "clientInfo": { "name": "rust-mcp-server", "version": "0.1.0" },
             "rootUri": root_uri,
+            "workspaceFolders": workspace_folders,
             "capabilities": {
                 "window": { "workDoneProgress": true },
                 "textDocument": {
@@ -199,6 +207,8 @@ impl RustAnalyzerClient {
         });
 
         let _response = self.send_request("initialize", init_params).await?;
+        dbg_log(&format!("initialize response capabilities keys: {:?}",
+            _response.get("result").and_then(|r| r.get("capabilities")).and_then(|c| c.as_object()).map(|o| o.keys().collect::<Vec<_>>())));
         self.send_notification("initialized", json!({})).await?;
         self.initialized = true;
         // Don't block on project indexing — RA queues LSP requests during indexing
@@ -278,9 +288,14 @@ impl RustAnalyzerClient {
 
     // ---- LSP lifecycle helpers ---------------------------------------------
 
-    /// Send textDocument/didOpen so rust-analyzer indexes the file and emits diagnostics.
+    /// Send textDocument/didOpen so rust-analyzer indexes the file. Skips
+    /// duplicate opens (RA errors on double DidOpenTextDocument for same URI).
     pub async fn did_open(&mut self, abs_path: &str) -> Result<()> {
         let uri = uri_from_path(abs_path);
+        if !self.open_files.insert(uri.clone()) {
+            // Already opened — skip.
+            return Ok(());
+        }
         let content = std::fs::read_to_string(abs_path)
             .map_err(|e| anyhow!("reading {abs_path}: {e}"))?;
         let lang_id = if abs_path.ends_with(".rs") { "rust" }
@@ -298,17 +313,81 @@ impl RustAnalyzerClient {
                 }
             }),
         )
-        .await
+        .await?;
+        // Wait for RA to publish diagnostics — this confirms the file is indexed.
+        self.wait_for_diagnostics(&abs_path).await;
+        Ok(())
     }
 
-    /// Send textDocument/didClose.
+    /// Send textDocument/didClose and remove from open_files tracking.
     pub async fn did_close(&mut self, abs_path: &str) -> Result<()> {
         let uri = uri_from_path(abs_path);
+        self.open_files.remove(&uri);
         self.send_notification(
             "textDocument/didClose",
             json!({ "textDocument": { "uri": uri } }),
         )
         .await
+    }
+
+    /// Wait up to 10s for a publishDiagnostics notification for the given file,
+    /// draining notifications until one arrives or timeout. This ensures RA has
+    /// finished analyzing the file before we send queries.
+    async fn wait_for_diagnostics(&mut self, abs_path: &str) {
+        let target_uri = uri_from_path(abs_path);
+        // Drain pending messages for up to 10s looking for publishDiagnostics
+        // matching our URI. Non-matching notifications are consumed and discarded;
+        // responses (with result/error + id) are left in the channel.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if tokio::time::Instant::now() >= deadline { return; }
+            match self.receiver.as_mut() {
+                Some(rx) => {
+                    match tokio::time::timeout_at(deadline, rx.recv()).await {
+                        Ok(Some(msg_val)) => {
+                            // Check if this is a publishDiagnostics for our file.
+                            let method = msg_val.get("method").and_then(|m| m.as_str());
+                            if method == Some("textDocument/publishDiagnostics") {
+                                let uri = msg_val
+                                    .get("params")
+                                    .and_then(|p| p.get("uri"))
+                                    .and_then(|u| u.as_str())
+                                    .unwrap_or("");
+                                // RA may send diagnostics for multiple files; check if ours is included.
+                                if !msg_val
+                                    .get("params")
+                                    .and_then(|p| p.get("diagnostics"))
+                                    .map(|d| d.is_array() && !d.as_array().unwrap().is_empty())
+                                    .unwrap_or(false)
+                                {
+                                    // Empty diagnostics — file analyzed but no issues. Good enough.
+                                    return;
+                                }
+                                if uri == target_uri { return; }
+                            } else if msg_val.get("result").is_some() || msg_val.get("error").is_some() {
+                                // This is a response to our request, not a notification.
+                                // Put it back? Can't put back into unbounded channel easily,
+                                // so handle: re-send won't work. Just consume and discard —
+                                // but this could be the initialize result we're waiting for!
+                                // Actually wait_for_diagnostics is called AFTER did_open which
+                                // is after initialize, so responses here are likely stale.
+                                dbg_log("wait_for_diagnostics: consumed a response (discarding)");
+                            } else if msg_val.get("id").is_some() {
+                                // Server-initiated request — respond with null.
+                                let resp = json!({
+                                    "jsonrpc": "2.0",
+                                    "id": msg_val.get("id").cloned().unwrap(),
+                                    "result": Value::Null
+                                });
+                                self.send_message(&resp).await.ok();
+                            }
+                        }
+                        _ => return,
+                    }
+                }
+                None => return,
+            }
+        }
     }
 
     // ---- Tool implementation methods ---------------------------------------
