@@ -80,7 +80,7 @@ pub struct McpServerState {
     pub config: McpServerConfig,
     /// Hot-swappable peer — all McpTool instances hold a clone of this guard.
     peer_slot: Arc<Mutex<Option<rmcp::Peer<RoleClient>>>>,
-    status: Mutex<ServerStatus>,
+    status: Arc<Mutex<ServerStatus>>,
     retry_count: Mutex<usize>,
     log_ring: Arc<StderrLogRing>,
 }
@@ -91,7 +91,7 @@ impl McpServerState {
             name,
             config,
             peer_slot: Arc::new(Mutex::new(None)),
-            status: Mutex::new(ServerStatus::Starting),
+            status: Arc::new(Mutex::new(ServerStatus::Starting)),
             retry_count: Mutex::new(0),
             log_ring: Arc::new(StderrLogRing::new()),
         }
@@ -156,7 +156,7 @@ async fn initial_spawn(
     state: &McpServerState,
 ) -> Result<Vec<Arc<dyn Tool>>, Box<dyn std::error::Error + Send + Sync>> {
     let runner = McpSpawnRunner { name: state.name.clone(), config: state.config.clone() };
-    match runner.spawn_with_log(&state.peer_slot, state.log_ring.clone()).await {
+    match runner.spawn_with_log(&state.peer_slot, state.log_ring.clone(), Arc::clone(&state.status)).await {
         Ok(tools) => {
             *state.status.lock().await = ServerStatus::Running;
             *state.retry_count.lock().await = 0;
@@ -215,7 +215,7 @@ async fn supervise(state: Arc<McpServerState>) {
             name: state.name.clone(),
             config: state.config.clone(),
         };
-        match runner.spawn_with_log(&state.peer_slot, state.log_ring.clone()).await {
+        match runner.spawn_with_log(&state.peer_slot, state.log_ring.clone(), Arc::clone(&state.status)).await {
             Ok(_tools) => {
                 *state.status.lock().await = ServerStatus::Running;
                 *state.retry_count.lock().await = 0;
@@ -249,6 +249,7 @@ impl McpSpawnRunner {
         &self,
         peer_slot: &Arc<Mutex<Option<rmcp::Peer<RoleClient>>>>,
         log_ring: Arc<StderrLogRing>,
+        status_handle: Arc<Mutex<ServerStatus>>,
     ) -> Result<Vec<Arc<dyn Tool>>, Box<dyn std::error::Error + Send + Sync>>
     {
         let mut cmd = tokio::process::Command::new(&self.config.command[0]);
@@ -306,13 +307,20 @@ impl McpSpawnRunner {
             }) as Arc<dyn Tool>);
         }
 
-        // Keep the service loop alive in background.
+        // Keep the service loop alive in background. When it ends (child died),
+        // mark server Crashed so supervisor can respawn — unless already Restarting/Disabled.
         let name_clone = self.name.clone();
         tokio::spawn(async move {
             debug!("[mcp] {} waiting for service loop...", name_clone);
             let result = running_service.waiting().await;
-            warn!("[mcp] {} service loop ended: {:?}", name_clone, result.is_ok());
+            warn!("[mcp:{}:waiter] service loop ended ok={}", name_clone, result.is_ok());
             drop(result);
+            // Only mark crashed if currently Running/Starting (not Restarting or Disabled).
+            let mut status = status_handle.lock().await;
+            match *status {
+                ServerStatus::Running | ServerStatus::Starting => { *status = ServerStatus::Crashed; }
+                _ => {}
+            }
         });
 
         Ok(tools_vec)
@@ -500,7 +508,7 @@ impl Tool for McpRestartTool {
             name: state.name.clone(),
             config: state.config.clone(),
         };
-        match runner.spawn_with_log(&state.peer_slot, state.log_ring.clone()).await {
+        match runner.spawn_with_log(&state.peer_slot, state.log_ring.clone(), Arc::clone(&state.status)).await {
             Ok(_tools) => {
                 *state.status.lock().await = ServerStatus::Running;
                 info!("MCP server '{}' manually restarted", name);
