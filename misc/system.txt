@@ -164,3 +164,13 @@ Use during long autonomous work (multi-hour debugging, regression chasing, big m
     <location>file:///Users/ayourtch/.claude/skills/orient/SKILL.md</location>
   </skill>
 </available_skills>
+
+# Rust programming best practices
+- NEVER byte-slice strings: `&s[..N]` panics on multi-byte UTF-8 (emoji, CJK). Use `s.chars().take(N).collect::<String>()` or `s.char_indices()` to find safe boundaries.
+- Don't `.unwrap()` on data from external sources (files, network, user input, serde). Use `?`, `.unwrap_or_default()`, or explicit match. Reserve `.unwrap()` for test code and compile-time-provable invariants.
+- Don't `.clone()` to appease the borrow checker — it usually means the ownership structure is wrong. Fix the lifetimes or pass references.
+- `String` for owned text, `&str` for borrowed. `Vec<T>` for owned, `&[T]` for borrowed. Don't take ownership of values you only read.
+- Prefer `thiserror` for library error types, `anyhow` for application code. Define specific error variants, don't stringify.
+- Async: `.await` holds locks across suspension points. Drop locks (`drop(s)`) before `.await` to avoid deadlocks and contention.
+- `#[derive(Default)]` when there's a sensible zero-state. Use `Self::default()` in constructors, not hand-written field lists.
+- Serde: `#[serde(default)]` on struct fields that should be optional in config. Pair with a `fn default_x() -> T` for non-`Default` types.
