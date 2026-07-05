@@ -256,6 +256,9 @@ impl McpSpawnRunner {
         if self.config.command.len() > 1 {
             cmd.args(&self.config.command[1..]);
         }
+        for (k, v) in &self.config.env {
+            cmd.env(k, v);
+        }
         let (transport, stderr) =
             TokioChildProcess::builder(cmd).stderr(Stdio::piped()).spawn()?;
 

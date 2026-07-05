@@ -78,6 +78,7 @@ expose = []
 command = ["target/release/mcp-rlsp"]
 default = true
 expose = []
+env = { RUST_ANALYZER_PATH = "/Users/ayourtch/rust/gladiator/tmp/rust-analyzer/target/release/rust-analyzer" }
 
 [mcp_servers.mcp-run-command]
 command = ["/Users/ayourtch/rust/mcp-run-command/target/release/mcp-run-command"]

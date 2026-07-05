@@ -418,6 +418,9 @@ pub struct McpServerConfig {
     pub default: bool,
     #[serde(default)]
     pub expose: Vec<String>,
+    /// Environment variables to set when spawning this MCP server.
+    #[serde(default)]
+    pub env: HashMap<String, String>,
 }
 
 impl Config {

@@ -199,14 +199,14 @@ impl RustAnalyzerClient {
         // at least one END, assume indexing is done (some progress tokens never
         // formally send an "end" — e.g. "Roots Scanned").
         let quiet_duration = std::time::Duration::from_secs(10);
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(180);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
         // Count consecutive quiet periods with active tokens still outstanding.
         // After 3 consecutive quiets (~30s of silence), treat remaining tokens as stale.
         let mut consecutive_quiets_with_active = 0u32;
 
         loop {
             if tokio::time::Instant::now() >= deadline {
-                dbg_log("wait_for_indexing: timeout (180s), proceeding anyway");
+                dbg_log("wait_for_indexing: timeout (300s), proceeding anyway");
                 return;
             }
             match self.receiver.as_mut() {

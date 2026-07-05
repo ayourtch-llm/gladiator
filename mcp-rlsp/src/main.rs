@@ -4,17 +4,13 @@ use mcp_rlsp::server::RustMcpServer;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let mut rust_server = RustMcpServer::new();
+    let rust_server = RustMcpServer::new();
 
-    eprintln!("Starting mcp-rlsp server");
+    eprintln!("Starting mcp-rlsp server (RA will spawn lazily on first tool call)");
 
-    // Spawn RA and drain its initial indexing notification burst now,
-    // before accepting MCP tool calls. This blocks startup but means
-    // the first tool call hits an already-indexed RA.
-    eprintln!("Spawning rust-analyzer and waiting for index...");
-    rust_server.start().await?;
-    eprintln!("rust-analyzer ready, serving on stdio...");
-
+    // Don't eagerly start RA here — indexing takes 200+ seconds and would
+    // block the MCP handshake. Each tool handler calls ensure_started()
+    // which spawns RA + waits for indexing before executing the query.
     let service = rust_server.serve(stdio()).await?;
     service.waiting().await?;
 

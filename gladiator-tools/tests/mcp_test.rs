@@ -1,5 +1,6 @@
 use gladiator_tools::mcp::McpServerRunner;
 use gladiator_core::config::McpServerConfig;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Locate the mcp-random binary built by this workspace.
@@ -38,6 +39,7 @@ fn make_config() -> McpServerConfig {
         command: vec![bin.to_string_lossy().to_string()],
         default: true,
         expose: vec![],
+        env: HashMap::new(),
     }
 }
 
@@ -145,6 +147,7 @@ async fn test_mcp_expose_filter() -> Result<(), Box<dyn std::error::Error + Send
         command: vec![bin.to_string_lossy().to_string()],
         default: false,
         expose: vec!["random_integer".to_string()],
+        env: HashMap::new(),
     };
 
     let runner = McpServerRunner::new("test".to_string(), config);
