@@ -108,5 +108,15 @@
     "id": "0c08e0c5-a253-4434-a02e-d8be00eed584",
     "phrase": "the \"N chars\" indicator on the left needs to be shown/populated also when we are parsing/forming the tool calls - maybe with the respective different title instead of simply \"Working...\" - for that particular state.",
     "done": true
+  },
+  {
+    "id": "9478950a-5613-45ee-a65b-1ed7b3bccf13",
+    "phrase": "the progressive writing of [tool] messages in the chat should show linefeeds, etc. - it will be replaced later but transiently it is nice to see the progress.",
+    "done": true
+  },
+  {
+    "id": "7f4b40c7-7adb-4737-b950-a871a64dae80",
+    "phrase": "For \"Thinking ...\" indicator - it might be a nice idea to display the anticipated time left, based on the previous occurrences - take the amount of \"new\" information in the past requests divided by the time it took to process it - multiplied by the amount of \"new\" information in this request. If that estimate turns out to be very wrong - assume the cache was off and consider the entire request to be \"new\" and give estimation based on that. This would be a nice quality of life improvement for the UX",
+    "done": false
   }
 ]

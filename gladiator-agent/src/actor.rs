@@ -814,10 +814,17 @@ impl Actor for AgentActor {
                                 // published on the bus.
                                 if crate::internal_tools::is_internal_tool(&func_name) {
                                     info!("Agent {} handling internal tool: {}", self.index, func_name);
+                                    // Publish structured JSON so the TUI can match
+                                    // this dispatch back to the streamed [tool]
+                                    // placeholder by id.
                                     let tool_status = Message::new(
                                         &self.stream_output_topic,
                                         &self.id(),
-                                        format!("Calling tool: {}({})", func_name, func_args_str),
+                                        serde_json::json!({
+                                            "id": tool_call_id,
+                                            "name": func_name,
+                                            "text": format!("Calling tool: {}({})", func_name, func_args_str),
+                                        }),
                                     ).with_type("Info");
                                     let _ = bus.publish(&self.id(), tool_status).await;
 
@@ -865,10 +872,17 @@ impl Actor for AgentActor {
                                 info!("Agent {} dispatching tool call: {}({})", self.index, func_name, func_args_str);
 
                                 // Publish tool call status to TUI
+                                // Publish structured JSON so the TUI can match
+                                // this dispatch back to the streamed [tool]
+                                // placeholder by id.
                                 let tool_status = Message::new(
                                     &self.stream_output_topic,
                                     &self.id(),
-                                    format!("Calling tool: {}({})", func_name, func_args_str),
+                                    serde_json::json!({
+                                        "id": tool_call_id,
+                                        "name": func_name,
+                                        "text": format!("Calling tool: {}({})", func_name, func_args_str),
+                                    }),
                                 ).with_type("Info");
                                 let _ = bus.publish(&self.id(), tool_status).await;
 

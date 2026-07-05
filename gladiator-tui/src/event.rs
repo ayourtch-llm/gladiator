@@ -16,7 +16,6 @@ pub fn bus_to_app_message(msg: &Message) -> Option<AppMessage> {
             // Filter out noise types
             "LlmStreamEnd" | "LlmToolCalls" | "StreamStats" | "LlmRequestSent" => None,
             "LlmToolCall" => {
-                // Tool call building progress — parse JSON payload
                 let name = msg.payload.get("function")
                     .and_then(|f| f.get("name"))
                     .and_then(|n| n.as_str())
@@ -25,6 +24,18 @@ pub fn bus_to_app_message(msg: &Message) -> Option<AppMessage> {
                     .and_then(|f| f.get("arguments"))
                     .and_then(|a| a.as_str())
                     .unwrap_or("");
+
+                // Stable id for matching: prefer the LLM-provided call id,
+                // fall back to index-based synthetic key.
+                let tool_id = msg.payload.get("id")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .or_else(|| {
+                        msg.payload.get("index")
+                            .and_then(|i| i.as_u64())
+                            .map(|idx| format!("__idx_{}", idx))
+                    });
 
                 // If this is an edit_file / plan_edits call with complete
                 // arguments, render the change as a unified-diff instead of
@@ -38,8 +49,7 @@ pub fn bus_to_app_message(msg: &Message) -> Option<AppMessage> {
                             format!("{}({})", name, args)
                         }
                     } else {
-                        // Arguments still being built (partial JSON) — show
-                        // the in-progress call without a diff.
+                        // Arguments still being built (partial JSON).
                         if !name.is_empty() && parsed_args.is_none() && !args.contains("{") {
                             format!("{}(building...)", name)
                         } else {
@@ -51,23 +61,45 @@ pub fn bus_to_app_message(msg: &Message) -> Option<AppMessage> {
                 } else {
                     "building...".to_string()
                 };
-                Some(AppMessage {
-                    role: AppMessageRole::Tool,
-                    content,
-                })
+                Some(AppMessage::tool(content, tool_id))
             }
             "LlmToolResult" => {
-                Some(AppMessage {
-                    role: AppMessageRole::Tool,
-                    content,
-                })
+                // LlmToolResult payload is a string of the form:
+                //   "  [tool_result] func_name(tool_call_id) => result_text"
+                // Parse out tool_call_id for matching.
+                let tool_id = parse_tool_result_id(&content);
+                Some(AppMessage::tool(content, tool_id))
             }
             "Error" => Some(AppMessage::error(content)),
             "Warning" => Some(AppMessage {
                 role: AppMessageRole::Error,
                 content,
+                tool_id: None,
             }),
-            "Info" => Some(AppMessage::info(content)),
+            "Info" => {
+                // Support both legacy plain-text and structured JSON payloads.
+                if let Some(text) = content.strip_prefix("Calling tool:") {
+                    return Some(AppMessage::info(format!("Calling tool: {}", text.trim())));
+                }
+                // Structured form: {"id": ..., "name": ..., "text": "..."}
+                if msg.payload.is_object() {
+                    let id = msg.payload.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let name = msg.payload.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    let text = msg.payload.get("text").and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| format!("Calling tool: {}", name));
+                    // If this is a "Calling tool:" dispatch, tag with id for
+                    // coalescing into the matching [tool] placeholder.
+                    if text.starts_with("Calling tool:") {
+                        let display = text.trim_start_matches("Calling tool: ").to_string();
+                        Some(AppMessage::tool(display, if !id.is_empty() { Some(id) } else { None }))
+                    } else {
+                        Some(AppMessage::info(text))
+                    }
+                } else {
+                    Some(AppMessage::info(content))
+                }
+            }
             "PersistenceResponse" => {
                 let success = msg.payload.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
                 let message = msg.payload.get("message").and_then(|v| v.as_str()).unwrap_or("Unknown response").to_string();
@@ -89,5 +121,36 @@ pub fn bus_to_app_message(msg: &Message) -> Option<AppMessage> {
             _ => None,
         },
         None => None,
+    }
+}
+
+/// Parse the tool_call_id from an LlmToolResult display string of the form:
+///   "  [tool_result] func_name(tool_call_id) => result_text"
+/// Returns the id if found.
+fn parse_tool_result_id(content: &str) -> Option<String> {
+    // Find "(...)" — the content inside parens is the tool_call_id
+    let start = content.find('(')?;
+    let end = content[start..].find(')').map(|p| p + start)?;
+    if end > start + 1 {
+        Some(content[start + 1..end].to_string())
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_result_id_basic() {
+        let s = "  [tool_result] bash(call_abc) => done";
+        assert_eq!(parse_tool_result_id(s), Some("call_abc".to_string()));
+    }
+
+    #[test]
+    fn parse_result_id_error_form() {
+        let s = "  [tool_error] edit_file(__idx_0) => failed";
+        assert_eq!(parse_tool_result_id(s), Some("__idx_0".to_string()));
     }
 }

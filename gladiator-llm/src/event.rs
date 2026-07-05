@@ -24,15 +24,18 @@ pub enum LlmEvent {
         id: String,
     },
     ToolInputStart {
+        index: usize,
         id: String,
         name: String,
     },
     ToolInputDelta {
+        index: usize,
         id: String,
         name: String,
         text: String,
     },
     ToolInputEnd {
+        index: usize,
         id: String,
         name: String,
         input: String,

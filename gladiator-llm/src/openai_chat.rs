@@ -105,11 +105,13 @@ impl Protocol for OpenAIChatProtocol {
 
                                 if !call_id.is_empty() || !name.is_empty() {
                                     events.push(LlmEvent::ToolInputStart {
+                                        index: idx,
                                         id: tc_id.clone(),
                                         name: tc_name.clone(),
                                     });
                                 }
                                 events.push(LlmEvent::ToolInputDelta {
+                                    index: idx,
                                     id: tc_id,
                                     name: tc_name,
                                     text: combined,

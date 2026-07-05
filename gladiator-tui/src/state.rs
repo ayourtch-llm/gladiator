@@ -13,6 +13,11 @@ pub enum AppMessageRole {
 pub struct AppMessage {
     pub role: AppMessageRole,
     pub content: String,
+    /// Stable identifier for tool-call messages so streaming deltas, dispatch
+    /// Info ("Calling tool:"), and LlmToolResult can all be matched back to the
+    /// same chat line even when multiple tools are in flight. Set only on Tool-
+    /// role messages; None for everything else.
+    pub tool_id: Option<String>,
 }
 
 impl AppMessage {
@@ -20,6 +25,7 @@ impl AppMessage {
         Self {
             role: AppMessageRole::User,
             content: content.into(),
+            tool_id: None,
         }
     }
 
@@ -27,6 +33,7 @@ impl AppMessage {
         Self {
             role: AppMessageRole::Assistant,
             content: content.into(),
+            tool_id: None,
         }
     }
 
@@ -34,13 +41,26 @@ impl AppMessage {
         Self {
             role: AppMessageRole::Thinking,
             content: content.into(),
+            tool_id: None,
         }
     }
 
+    /// Construct a Tool-role message tagged with `tool_id` for cross-message
+    /// matching. The display content is built by the caller.
+    pub fn tool(content: impl Into<String>, tool_id: Option<String>) -> Self {
+        Self {
+            role: AppMessageRole::Tool,
+            content: content.into(),
+            tool_id,
+        }
+    }
+
+    #[allow(dead_code)]
     pub fn tool_call(tool_name: &str, args: &str, result: &str) -> Self {
         Self {
             role: AppMessageRole::Tool,
             content: format!("[{}] {} => {}", tool_name, args, result),
+            tool_id: None,
         }
     }
 
@@ -48,6 +68,7 @@ impl AppMessage {
         Self {
             role: AppMessageRole::Error,
             content: content.into(),
+            tool_id: None,
         }
     }
 
@@ -55,6 +76,7 @@ impl AppMessage {
         Self {
             role: AppMessageRole::Info,
             content: content.into(),
+            tool_id: None,
         }
     }
 
@@ -62,6 +84,7 @@ impl AppMessage {
         Self {
             role: AppMessageRole::System,
             content: content.into(),
+            tool_id: None,
         }
     }
 }
@@ -870,6 +893,33 @@ impl ChatState {
     pub fn replace_last(&mut self, content: String) {
         if let Some(last) = self.messages.last_mut() {
             last.content = content;
+        }
+    }
+
+    /// Find the index (scanning backwards from newest) of a Tool-role
+    /// message whose `tool_id` matches. Used to coalesce streaming deltas,
+    /// dispatch Info, and results onto one chat line per tool call.
+    pub fn find_tool_by_id(&self, id: &str) -> Option<usize> {
+        self.messages
+            .iter()
+            .rev()
+            .position(|m| m.role == AppMessageRole::Tool && m.tool_id.as_deref() == Some(id))
+            .map(|pos_from_back| self.messages.len().saturating_sub(1).saturating_sub(pos_from_back))
+    }
+
+    /// Replace the content of a Tool message at `index`, preserving its
+    /// tool_id.
+    pub fn replace_tool(&mut self, index: usize, content: String) {
+        if let Some(msg) = self.messages.get_mut(index) {
+            msg.content = content;
+        }
+    }
+
+    /// Append text to the content of a Tool message at `index`.
+    #[allow(dead_code)]
+    pub fn append_to_tool(&mut self, index: usize, text: &str) {
+        if let Some(msg) = self.messages.get_mut(index) {
+            msg.content.push_str(text);
         }
     }
 

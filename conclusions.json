@@ -1,0 +1,114 @@
+[
+  {
+    "id": "f26cc82d-a80e-47df-b781-27291d46b8c2",
+    "text": "Implementing fixme #2: up/down visual line movement in multiline editor. Plan: Add `cursor_up`, `cursor_down`, `is_multiline`, and `visual_layout` to `InputState` in state.rs. Add `terminal_width` field to `App` in app.rs, set it in the render loop via `crossterm::terminal::size()`. In `handle_key`, Up/Down dispatch to visual line movement when `is_multiline` is true, otherwise history prev/next. Shift+Up/Down stays as scroll."
+  },
+  {
+    "id": "f99bd574-d203-476b-9a04-d732add204f5",
+    "text": "Bug: iteration_count in ConversationState never resets on new user input. Once max_iterations reached, subsequent user messages still see iteration_count >= max, causing spurious \"Max iterations reached\" warnings. Fix: reset iteration_count to 0 when a new user message arrives (not when buffered during pending tool calls). Add reset_iteration() method to ConversationState and call it in the input_rx handler in actor.rs."
+  },
+  {
+    "id": "5cda203d-6c89-4cfc-9cd8-0e8757e2d29a",
+    "text": "Bug: iteration_count not reset when pending user messages are drained after tool completion. The input_rx handler calls reset_iteration(), but messages buffered during pending tool calls bypass it. Fix: in actor.rs tool_results handler, drain pending messages BEFORE the max_reached check, and reset iteration_count when pending messages exist. This prevents \"please continue\" from being stuck forever when max_iterations was reached."
+  },
+  {
+    "id": "9d0e5847-ab5f-433f-a400-317a2f05ca95",
+    "text": "Adding `create_fixme` tool to gladiator. Pattern: new `CreateFixmeTool` struct in fixme.rs mirroring existing tools (GetAllFixmesTool etc), takes `phrase` param, calls `store.add()`. Export from lib.rs, register in main.rs under `config.tools.fixme`, add tests in fixme_test.rs."
+  },
+  {
+    "id": "d7c8baac-b5ed-46c7-9e51-bbc4d40b1607",
+    "text": "Fixme 6ccf9bf8: Display pending user messages above the editor. Plan: (1) Agent publishes \"UserMessageQueued\"/\"UserMessageDisplayed\" to agent_stream when buffering vs processing user input. (2) TUI removes local chat.add_message on Enter, instead shows messages via bus events. (3) TUI gains pending_messages field; render shows them above editor. (4) When agent drains pending messages, publishes \"UserMessageDisplayed\" for each."
+  },
+  {
+    "id": "444cdd5e-113b-409f-98ec-bf955c186b37",
+    "text": "rustmcp MCP server failed to spawn because src/main.rs:12-13 used println! (stdout), corrupting the JSON-RPC stream. Fixed to eprintln! (stderr). Rebuilt to /tmp/rustmcp-build/release/rustmcp (original target/release/rustmcp is SIP-locked via com.apple.provenance xattr, cannot overwrite). Updated gladiator.toml to point command at /tmp/rustmcp-build/release/rustmcp. User must restart gladiator to pick up rustmcp tools."
+  },
+  {
+    "id": "68d3fe8a-68a6-4677-bfd1-63cba8536839",
+    "text": "Compared gladiator-llm (Rust, single-file actor) vs opencode/packages/llm (TypeScript, Effect-based). Gladiator is a minimal OpenAI-compatible SSE client; opencode is a multi-protocol, multi-provider abstraction layer with schema validation, routing, framing, and provider-specific protocols."
+  },
+  {
+    "id": "e5ef2b44-ec07-491f-9eb7-4e70ac9e7d0f",
+    "text": "Phase 1 complete: extracted 15 modules from monolithic lib.rs into protocol-oriented architecture. All 9 existing tests pass. Next: Phase 2 (refactor actor internals) and Phase 3 (add new tests for new modules)."
+  },
+  {
+    "id": "4bc12dc7-930f-4a8b-90ef-13bd028bed79",
+    "text": "Phase 1 complete: extracted 15 modules from monolithic lib.rs into protocol-oriented architecture. All 29 tests pass (9 original + 20 new). Next: Phase 2 (refactor actor internals to use new abstractions) and Phase 4 (add tool execution, generateObject)."
+  },
+  {
+    "id": "89be4292-1e31-4c49-b9e3-7b95e4b78316",
+    "text": "Phase 1 complete: extracted 15 modules from monolithic lib.rs into protocol-oriented architecture. All 29 tests pass. Phase 2: refactor actor to use ToolRuntime, GenerateObject, and other new abstractions."
+  },
+  {
+    "id": "a320339e-5a1d-4d73-b459-bd954267a9e6",
+    "text": "Removing redundant tools from rustmcp that bash already covers: format_code, run_cargo_check, apply_clippy_suggestions. These are in cargo.rs (run_cargo_check, analyze_manifest — keeping analyze_manifest), formatting.rs (format_code), quality.rs (apply_clippy_suggestions). Need to remove tool definitions from types.rs get_tools() and execute_tool match arms, plus the impl functions, then rebuild rustmcp binary at /tmp/rustmcp-build/release/rustmcp."
+  },
+  {
+    "id": "4fa6f038-1808-419c-99fb-0e22b2434de1",
+    "text": "rust-mcp pruning session continuation. State verified: cargo check passes; staged changes correctly remove bash-replaceable stubs (cargo.rs/generation.rs deleted, advanced.rs/types.rs/client.rs/mod.rs trimmed) leaving 11 tools. But staging also includes stray experimental files (.gitignore, examples/test_macros.rs, tests/integration_test.rs) that break `cargo test --no-run` due to missing rmcp features (`transport-child-process`, `client`) and type-inference errors — these are abandoned macro experiments not mentioned in the handoff's \"what was done\". Plan: (1) unstage+delete broken example/test files; keep .gitignore; commit pruning per step 1 of handoff. (2) Rebuild release binary. Steps 2-3 (implement real LSP stubs for get_diagnostics/extract_function/etc.) are larger future work — not in this turn's scope unless asked."
+  },
+  {
+    "id": "24fb4401-8c3d-4e31-b9a3-beafd3fd9fab",
+    "text": "rust-mcp pruning committed as `9d4951e`. Removed bash-replaceable stubs + broken example/test files; added /target .gitignore. cargo check passes, release binary rebuilt at target/release/rustmcp (3.0 MB). Working tree clean on main, 4 commits ahead of origin/main. Remaining work: implement real LSP for the 7 remaining stubs (get_diagnostics via notifications, extract_function/inline/change_signature/org_imports via code actions + applyEdit, get_type_hierarchy via typeHierarchy requests); validate_lifetimes has no standard LSP method — decide keep/remove later."
+  },
+  {
+    "id": "1a63104d-c069-4322-b8ec-15d71ac18ea3",
+    "text": "Plan for implementing remaining LSP stubs in rust-mcp. (1) Enhance RustAnalyzerClient: capture notifications during read loop, add didOpen/didClose helpers so we can collect publishDiagnostics and trigger code actions on open files. (2) Add protocol.rs builders for textDocument/codeAction params + typeHierarchy prepare/supertypes. (3) Implement get_diagnostics via didOpen+collect diagnostics then close doc. (4) Add apply_text_edits helper that applies WorkspaceEdit changes to disk sorted descending by line so edits don't shift earlier offsets. (5) organize_imports: codeAction source.organizeImports + apply edits. extract_function/inline_function: refactor.extract.function / refactor.inline at position, both via code actions. get_type_hierarchy: add typeHierarchy capability in initialize; prepareTypeHierarchy then supertypes/subtypes requests. (6) Remove change_signature and validate_lifetimes — no stable LSP method exists for either. Drop their tool defs/match arms/impl fns/client methods."
+  },
+  {
+    "id": "834a5d23-6983-41c5-aa63-e4fb689608aa",
+    "text": "rust-mcp LSP stubs implemented and committed as f50545a. 9 tools now do real rust-analyzer JSON-RPC: find_definition, find_references, workspace_symbols (already had), rename_symbol (now applies WorkspaceEdit to disk), get_diagnostics (didOpen+definition round-trip+didClose), extract_function/inline_function (codeAction refactor.extract.function/refactor.inline + executeCommand or apply edit), organize_imports (source.organizeImports code action over full-doc range). Removed change_signature and validate_lifetimes — no stable LSP method. Added did_open/did_close lifecycle, read_response that skips notifications, uri_from_path canonicalization, create_range/code_action_params/prepare_type_hierarchy/supertypes helpers in protocol.rs, apply_workspace_edit+apply_edits_to_uri (reverse-order TextEdit application). Trimmed stale param structs from parameters.rs. cargo check clean, release binary rebuilt at target/release/rustmcp (~3.1 MB)."
+  },
+  {
+    "id": "390dfbfd-1d94-4cf6-bc44-53481f5ff20c",
+    "text": "Familiarized with gladiator repo: Rust workspace implementing an autonomous coding agent harness over a broadcast-bus actor model (gladiator-core Bus/Actor). Main bin wires up LLM, Agent, Persistence actors + tool runners + HTTP debug server + TUI; topics defined in TopicsConfig. Key flow: user→agent:in → Agent builds messages+tool_defs → llm:in → LlmActor streams via OpenAIChatProtocol (SSE) → agent forwards stream/tool_calls to agent:stream and dispatches external tools on tool:<name>:execute, internal tools inline; ToolActorRunner publishes results back to tool:results. Internal tools = todo_write/todo_read/restart_from_file handled in AgentActor against ConversationState."
+  },
+  {
+    "id": "5562889d-1d88-4972-8431-e4cc3b118ab8",
+    "text": "Fixme order: 1) af7a9240 edit_file/plan_edits diff display in TUI, 2) e62ae81b sandbox toggle /sandbox on|off + config, 3) cbf06db9 pending messages during LLM inference (agent.rs advance_turn_if_resolved only triggers after tool calls; need to also buffer when user msg arrives while no pending_tool_calls but an active request is in flight), 4) 7ade5a2a off-by-one in TUI render_pending, 5) 1c88c4e1 standalone llm-call actor. Key files: gladiator-tui/src/{render.rs,event.rs,app.rs,state.rs}, gladiator-agent/src/actor.rs (advance_turn_if_resolved + input handling), gladiator-llm/src/actor.rs (LlmActor run loop with active_request), gladiator-core/config/SandboxConfig in config.rs. plan_edits is an MCP tool from mcp-file-edit, not built-in; diff display must be done generically by parsing edit_file args and any tool named \"plan_edits\"/\"apply_edit_plan\"."
+  },
+  {
+    "id": "f606df93-fca0-4582-b741-136ef96d00fe",
+    "text": "Fixme af7a9240: Display edit_file args as unified-diff, same for plan_edits (MCP tool). Implementation goes into gladiator-tui/src/event.rs and app.rs where LlmToolCall messages are formatted — currently shows raw `name(json_args)`. Will add a diff_render module that parses file_path/old_content/new_content from edit_file args or the edits array of apply_edit_plan, computes line-level unified-diff hunks with context, returns formatted string. Both bus_to_app_message and handle_bus_message LlmToolCall branch will call it."
+  },
+  {
+    "id": "f39bd2ba-30bf-471b-ae77-7a1ea34e9504",
+    "text": "Fixmes 1 (af7a9240 diff display) and 2 (e62ae81b sandbox toggle) are committed. Fixme 3 next: cbf06db9 — pending messages should also trigger during active LLM inference, not just tool calls. The agent's input handler only buffers when `!s.pending_tool_calls.is_empty()`. Need to track an \"inference in flight\" state so user msgs arriving while the LLM is streaming are buffered too, then drained after the turn completes (like advance_turn_if_resolved does for tool results)."
+  },
+  {
+    "id": "2d2fc1fc-d6bd-4a31-ac27-37553dcc0f69",
+    "text": "Task: implement TUI activity spinner in gladiator-tui/. Add is_busy flag + braille spinner frames cycling on tick timer while busy (LLM streaming/tool exec). Edit only gladiator-tui files, build with cargo build -p gladiator-tui, test workspace, commit as \"feat(tui): activity spinner during LLM/tool activity\"."
+  },
+  {
+    "id": "0ca85089-740c-4a45-9c51-26172aa095cf",
+    "text": "Gladiator is a Rust workspace coding-agent harness built around a pub/sub actor model on broadcast channels (gladiator-core::Bus). 7 crates: core (bus/actor/message/config), llm (OpenAI-compatible streaming SSE, tool-call parsing, idle-timeout triage), tools (bash w/ macOS sandbox-exec, read/write/edit/glob/grep + MCP servers + fixme/conclusions/webfetch), agent (conversation state machine, internal todo/restart_from_file tools, max-iter handoff recovery, stuck-model detection), tui (ratatui terminal UI with emacs keys + slash commands), server (axum HTTP debug/SSE). Flow: user→agent:in→AgentActor builds messages+system prompt→llm:in→LlmActor streams SSE back via llm:stream/tool_calls/out; tool calls dispatched per-tool on `tool:<name>:execute`, results return on `tool:results`. Config in gladiator.toml, system message loaded from @misc/system.txt."
+  },
+  {
+    "id": "df627467-e8cc-4c28-8f8d-8cbb20eb50d6",
+    "text": "Fixme 80e7 (context usage in TUI): StreamStats is currently filtered as noise at app.rs:385. It carries Usage{input_tokens,output_tokens,total_tokens} + context_window. Plan: add fields to App (last_usage, context_window), capture them from StreamStats before the filter, show \"ctx: N/M tok (P%)\" in display_status(), and reset on restart_from_file bus message handling."
+  },
+  {
+    "id": "936a40d6-d96e-49ac-8130-aba878733dc9",
+    "text": "Fixme 233ff5b0: Agent publishes \"Sending request to LLM...\" as Info before send_conversation, but only one of two call-sites does this (line ~648). Plan: add a dedicated bus type \"LlmRequestSent\" published in send_conversation itself so both paths emit it; TUI sets is_busy=true + shows spinner with \"Thinking...\" label on LlmRequestSent, transitions to normal streaming display when first LlmStream/LlmThinking arrives."
+  },
+  {
+    "id": "46295edf-22fe-4169-9393-ba5e9a807273",
+    "text": "Fixmes 7b8c0e5d + 0c08e0c5: Both are about TUI spinner state during the tool-execution wait period between LlmToolCalls dispatch and results returning. Currently is_busy=false after LlmStreamEnd, so no spinner shows while tools run. Plan: track pending_tool_calls count (increment on Info \"Calling tool:\", decrement on each LlmToolResult), show a distinct busy label like \"Running tools... N/M\" with the char counter repurposed as completed/total. Need to inspect how LlmToolCalls and results flow through TUI handle_bus_message."
+  },
+  {
+    "id": "89d81f64-aeaf-47f7-9449-c1fc86017036",
+    "text": "Session work: fixed 6 TUI fixmes (ESC spinner stop, ctx usage display, dedup Calling-tool line, prefill Thinking... spinner, full colored diffs for edit_file/plan_edits, tool-execution Running tools N/M spinner). All committed. Also marked prior done fixmes a1b2..01-04 and f92b as done in fixme.json. No open fixmes remain. Next: user wants context refresh via restart_from_file handoff note."
+  },
+  {
+    "id": "28f48295-e0b8-4fdc-a586-19647006822b",
+    "text": "WebFetch full rewrite plan. Feature parity with opencode + large-response local caching browsable by file tools:\n1. Three formats: markdown (default), text, html — add `html2markdown` crate or manual converter.\n2. Accept headers per format; browser User-Agent default; configurable timeout param 1-120s; Cloudflare challenge retry with alternate UA (\"opencode\" → \"gladiator\"); MIME type checking (reject images/non-textual).\n3. Large-response caching: if response exceeds threshold, write full content to temp file under a managed dir, return preview + marker pointing to the cached path so read_file/grep can browse it.\n4. Update parameters JSON schema for format enum [markdown,text,html] and timeout number; update config.rs description.\n\nKey files: gladiator-tools/src/webfetch.rs (rewrite), Cargo.toml (add dep if needed)."
+  },
+  {
+    "id": "1819de6d-91e8-4e39-b196-1b78096669a6",
+    "text": "WebFetch fully implemented and wired. gladiator-tools/src/webfetch.rs rewritten with 3 formats (markdown default via html2md, text, html), Accept headers per format, browser UA + Cloudflare retry, configurable timeout 1-120s, MIME checking, large-response caching to /tmp/gladiator-webfetch/. Config: web_fetch=true added to gladiator.toml [tools]. All 13 unit tests pass, workspace builds clean."
+  },
+  {
+    "id": "c3e65527-a9e5-4445-b671-c9804a9d8430",
+    "text": "Plan to fix progressive tool-call display + coalescing with results for multiple tools in flight:\n\n1. Add `index: usize` field to LlmEvent::ToolInputStart/Delta/End (event.rs), pass through from openai_chat.rs.\n2. actor.rs ToolInputStart/Delta handlers: bind id+name, publish `\"id\"` and `\"index\"` alongside name+args in the LlmToolCall payload so TUI can key per-call by stable identifier instead of just \"last message\".\n3. AppMessage gains optional `tool_id` field for matching tool calls across streaming deltas + result coalescing.\n4. app.rs: replace single `last_tool_call_index` with a map/scan-backwards-by-id approach to find the right Tool line to update, even when multiple are in flight interleaved.\n5. Agent dispatch \"Calling tool:\" Info and LlmToolResult need id threaded so TUI can match them back to the streamed [tool] placeholder — include `id` field in those payloads (structured JSON or parseable format).\n6. When result arrives, coalesce: append/replace into existing Tool message rather than adding new line.\n\nKey files: gladiator-llm/src/event.rs, gladiator-llm/src/openai_chat.rs, gladiator-llm/src/actor.rs, gladiator-tui/src/state.rs (AppMessage), gladiator-tui/src/app.rs, gladiator-agent/src/actor.rs."
+  }
+]

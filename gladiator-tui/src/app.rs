@@ -546,13 +546,10 @@ impl App {
             return;
         }
 
-        // Handle tool call building progress (replace last tool message if same index)
+        // Handle tool call building progress — match by stable id (or
+        // index-based synthetic key) so multiple concurrent tools in flight
+        // each update their own chat line.
         if msg_type == "LlmToolCall" {
-            let call_index = msg
-                .payload
-                .get("index")
-                .and_then(|i| i.as_u64())
-                .map(|v| v as usize);
             let name = msg
                 .payload
                 .get("function")
@@ -565,11 +562,20 @@ impl App {
                 .and_then(|f| f.get("arguments"))
                 .and_then(|a| a.as_str())
                 .unwrap_or("");
+            // Stable matching key: prefer the LLM-provided call id; fall back
+            // to an index-based synthetic key.
+            let tool_id = msg.payload.get("id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    msg.payload.get("index")
+                        .and_then(|i| i.as_u64())
+                        .map(|idx| format!("__idx_{}", idx))
+                });
 
-            // If this is an edit_file / plan_edits call with complete JSON
-            // arguments, render the change as a unified-diff instead of raw
-            // args. Falls back to `name(args)` when parsing fails or there's
-            // nothing diffable.
+            // Compute the display content (diff for edit_file/plan_edits, raw
+            // args otherwise).
             let parsed_args = serde_json::from_str::<serde_json::Value>(args).ok();
             let content = if !name.is_empty() && !args.is_empty() {
                 if let Some(ref p) = parsed_args {
@@ -592,28 +598,31 @@ impl App {
                 "building...".to_string()
             };
 
-            // If same tool call index and last message is Tool, replace it
-            if call_index == self.last_tool_call_index && self.chat.message_count() > 0 {
-                let last = self.chat.messages().last().unwrap();
-                if last.role == crate::state::AppMessageRole::Tool {
-                    self.chat.replace_last(content);
+            // Match by tool_id: scan backwards for an existing Tool message
+            // with the same id and replace it in place (progressive update).
+            if let Some(ref tid) = tool_id {
+                if let Some(idx) = self.chat.find_tool_by_id(tid) {
+                    self.chat.replace_tool(idx, content);
                     return;
                 }
             }
-            // New tool call — add new message
-            self.chat.add_message(AppMessage {
-                role: crate::state::AppMessageRole::Tool,
-                content,
-            });
-            self.last_tool_call_index = call_index;
+            // New tool call — add a new Tool message tagged with the id.
+            self.chat.add_message(AppMessage::tool(content, tool_id));
             self.last_stream_type = None;
             return;
         }
 
         // Track tool-call dispatch/resolution for the "Running tools..." spinner.
         if msg_type == "Info" {
-            let content = msg.payload_str().unwrap_or_default();
-            if content.starts_with("Calling tool:") {
+            // Support both legacy plain and structured JSON payloads.
+            let is_calling = if let Some(s) = msg.payload_str() {
+                s.starts_with("Calling tool:")
+            } else if let Some(text) = msg.payload.get("text").and_then(|v| v.as_str()) {
+                text.starts_with("Calling tool:")
+            } else {
+                false
+            };
+            if is_calling {
                 self.pending_tool_calls += 1;
                 self.total_tool_calls = self.pending_tool_calls;
                 self.is_busy = true;
@@ -634,28 +643,40 @@ impl App {
 
         // All other message types
         if let Some(app_msg) = bus_to_app_message(msg) {
-            // "Calling tool: <name>(<args>)" Info messages duplicate the
-            // already-rendered [tool] building-progress line. Replace it in
-            // place instead of appending a second line.
-            if msg_type == "Info"
-                && app_msg.content.starts_with("Calling tool:")
-                && self.chat.message_count() > 0
-            {
-                let last = self.chat.messages().last().unwrap();
-                if last.role == crate::state::AppMessageRole::Tool {
-                    // Preserve the diff rendering for edit_file/plan_edits:
-                    // only replace when the [tool] line is a plain name(args)
-                    // form (no newline → no diff block).
-                    let content = app_msg.content.trim_start_matches("Calling tool: ").to_string();
-                    if !last.content.contains('\n') {
-                        self.chat.replace_last(content);
-                        return;
+            // "Calling tool:" dispatch (structured JSON from agent): the
+            // AppMessage returned is Tool-role with tool_id set. Coalesce by
+            // matching id back to an existing [tool] placeholder and replace.
+            if msg_type == "Info" && app_msg.role == crate::state::AppMessageRole::Tool {
+                if let Some(ref tid) = app_msg.tool_id {
+                    if let Some(idx) = self.chat.find_tool_by_id(tid) {
+                        // Preserve diff rendering: only replace when the
+                        // existing [tool] line has no newline (plain name(args)).
+                        let existing = &self.chat.messages()[idx];
+                        if !existing.content.contains('\n') {
+                            self.chat.replace_tool(idx, app_msg.content.clone());
+                            return;
+                        }
                     }
                 }
             }
+
+            // LlmToolResult: coalesce into the matching Tool message by id.
+            if msg_type == "LlmToolResult" && app_msg.tool_id.is_some() {
+                let tid = app_msg.tool_id.as_ref().unwrap();
+                if let Some(idx) = self.chat.find_tool_by_id(tid) {
+                    // Append result text after a separator so call + result
+                    // show as one coalesced block.
+                    let existing_content = self.chat.messages()[idx].content.clone();
+                    self.chat.replace_tool(
+                        idx,
+                        format!("{}\n  {}", existing_content, app_msg.content),
+                    );
+                    return;
+                }
+            }
+
             self.chat.add_message(app_msg);
             self.last_stream_type = None;
-            self.last_tool_call_index = None;
         }
     }
 
@@ -694,10 +715,11 @@ impl App {
                         } else {
                             "building...".to_string()
                         };
-                        self.chat.add_message(AppMessage {
-                            role: crate::state::AppMessageRole::Tool,
-                            content,
-                        });
+                        let tc_id = tc.get("id")
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.to_string());
+                        self.chat.add_message(AppMessage::tool(content, tc_id));
                     }
                 } else {
                     let content = msg
@@ -744,10 +766,7 @@ impl App {
                     .unwrap_or("")
                     .to_string();
                 let display = format!("[tool_result] {}({}) => {}", name, tool_call_id, content);
-                self.chat.add_message(AppMessage {
-                    role: crate::state::AppMessageRole::Tool,
-                    content: display,
-                });
+                self.chat.add_message(AppMessage::tool(display, if !tool_call_id.is_empty() { Some(tool_call_id.clone()) } else { None }));
             }
             "system" => {
                 let content = msg

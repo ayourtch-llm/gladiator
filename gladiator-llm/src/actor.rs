@@ -222,9 +222,13 @@ impl LlmActor {
                                             }
                                         }
                                     }
-                                    LlmEvent::ToolInputStart { name, .. } => {
-                                        // Publish tool call start to TUI for progress display
+                                    LlmEvent::ToolInputStart { index, ref name, ref id, .. } => {
+                                        // Publish tool call start to TUI for progress display.
+                                        // Include `index` and `id` so the TUI can match
+                                        // multiple concurrent tool calls by stable key.
                                         let tc_payload = serde_json::json!({
+                                            "index": index,
+                                            "id": id,
                                             "function": {
                                                 "name": name,
                                                 "arguments": "",
@@ -239,9 +243,13 @@ impl LlmActor {
                                         .with_stream_id(stream_id.to_string());
                                         let _ = bus.publish(&self.id(), tc_msg).await;
                                     }
-                                    LlmEvent::ToolInputDelta { name, text, .. } => {
-                                        // Publish incremental tool call progress to TUI
+                                    LlmEvent::ToolInputDelta { index, ref name, ref id, text, .. } => {
+                                        // Publish incremental tool call progress to TUI.
+                                        // `id` may be empty on early deltas before the
+                                        // provider sends it; fall back to index for matching.
                                         let tc_payload = serde_json::json!({
+                                            "index": index,
+                                            "id": id,
                                             "function": {
                                                 "name": name,
                                                 "arguments": text,
@@ -256,8 +264,27 @@ impl LlmActor {
                                         .with_stream_id(stream_id.to_string());
                                         let _ = bus.publish(&self.id(), tc_msg).await;
                                     }
-                                    LlmEvent::ToolInputEnd { .. } => {
-                                        // Tool calls are published after stream ends
+                                    LlmEvent::ToolInputEnd { index, ref id, name, input } => {
+                                        // Publish final tool call arguments to TUI so the
+                                        // [tool] placeholder shows complete args before the
+                                        // agent dispatches. This lets the display transition
+                                        // from streaming deltas to a finalized view.
+                                        let tc_payload = serde_json::json!({
+                                            "index": index,
+                                            "id": id,
+                                            "function": {
+                                                "name": name,
+                                                "arguments": input,
+                                            }
+                                        });
+                                        let tc_msg = gladiator_core::Message::new(
+                                            &self.stream_topic,
+                                            &self.id(),
+                                            tc_payload,
+                                        )
+                                        .with_type("LlmToolCall")
+                                        .with_stream_id(stream_id.to_string());
+                                        let _ = bus.publish(&self.id(), tc_msg).await;
                                     }
                                     LlmEvent::ToolCall { id, name, input } => {
                                         tool_calls.push(serde_json::json!({
