@@ -463,28 +463,7 @@ fn apply_edits_to_uri(uri: &str, edits_arr: &[Value]) -> Result<()> {
 
     // Convert text to Vec<char> for index-based editing.
     let mut chars: Vec<char> = text.chars().collect();
-    let mut line_starts: Vec<usize> = vec![0];
-    {
-        let mut idx = 0usize;
-        for c in &chars {
-            if *c == '\n' { line_starts.push(idx + 1); }
-            idx += 1;
-        }
-    }
-
-    // Helper to convert (line, char) -> absolute index into chars.
-    fn pos_to_index(line_starts: &[usize], chars_len: usize, line: usize, col: usize) -> usize {
-        if line == 0 { return std::cmp::min(col, chars_len); }
-        let mut idx = *line_starts.first().unwrap_or(&0);
-        for (i, start) in line_starts.iter().enumerate() {
-            if i + 1 == line { idx = *start; break; }
-            if i >= line { break; }
-            idx = *start;
-        }
-        // Compute end-of-line index.
-        let eol = line_starts.get(line).copied().unwrap_or(chars_len);
-        std::cmp::min(idx + col, eol)
-    }
+    let line_starts = build_line_starts(&chars);
 
     for (sl, sc, el, ec, new_text) in &collected {
         let start_idx = pos_to_index(&line_starts, chars.len(), *sl, *sc);
@@ -498,6 +477,112 @@ fn apply_edits_to_uri(uri: &str, edits_arr: &[Value]) -> Result<()> {
     std::fs::write(path, chars.iter().collect::<String>())
         .map_err(|e| anyhow!("writing {path}: {e}"))?;
     Ok(())
+}
+
+/// Build a Vec where index i = char-index of the start of LSP-line i.
+fn build_line_starts(chars: &[char]) -> Vec<usize> {
+    let mut ls = vec![0usize];
+    for (i, c) in chars.iter().enumerate() { if *c == '\n' { ls.push(i + 1); } }
+    ls
+}
+
+/// Convert an LSP (line, character) position to a char-index into `chars`.
+fn pos_to_index(line_starts: &[usize], chars_len: usize, line: usize, col: usize) -> usize {
+    let idx = *line_starts.get(line).unwrap_or(&chars_len);
+    // End-of-line clamp: start of next line minus the newline char; or end of text.
+    let eol = if let Some(next_start) = line_starts.get(line + 1) {
+        next_start.saturating_sub(1)
+    } else { chars_len };
+    std::cmp::min(idx + col, eol)
+}
+
+#[cfg(test)]
+mod pos_to_index_tests {
+    use super::*;
+
+    fn ls(text: &str) -> Vec<usize> {
+        let cv: Vec<char> = text.chars().collect();
+        build_line_starts(&cv)
+    }
+
+    #[test]
+    fn line2_col0_is_third_physical_line_start() {
+        // "aaa\nbbb\nccc" — LSP lines 0,1,2 start at char-indices 0,4,8
+        let l = ls("aaa\nbbb\nccc");
+        assert_eq!(l, vec![0, 4, 8]);
+        let n = "aaa\nbbb\nccc".chars().count();
+        // LSP line 2 col 0 -> index of 'c' in third physical line (index 8)
+        assert_eq!(pos_to_index(&l, n, 2, 0), 8);
+    }
+
+    #[test]
+    fn line1_col3_end_of_second_line() {
+        let l = ls("aaa\nbbb\nccc");
+        let n = "aaa\nbbb\nccc".chars().count();
+        // LSP line 1 col 3 -> end of 'bbb' (index 7)
+        assert_eq!(pos_to_index(&l, n, 1, 3), 4 + 3); // 7
+    }
+
+    #[test]
+    fn line0_col2_first_line() {
+        let l = ls("aaa\nbbb");
+        let n = "aaa\nbbb".chars().count();
+        assert_eq!(pos_to_index(&l, n, 0, 2), 2);
+    }
+
+    // End-to-end: simulate the rename_symbol corruption scenario.
+    // main.rs content with `rust_server` on LSP-lines 7,8,14. RA returns a
+    // WorkspaceEdit replacing each occurrence's range with "server".
+    #[test]
+    fn apply_workspace_edit_renames_all_occurrences_correctly() {
+        use std::env;
+        let dir = env::temp_dir();
+        let path = dir.join("mcp_rlsp_rename_test_main.rs");
+        let original =
+            "use anyhow::Result;\n\
+             use rmcp::{ServiceExt, transport::stdio};\n\
+             use mcp_rlsp::server::RustMcpServer;\n\n\
+             #[tokio::main]\n\
+             async fn main() -> Result<()> {\n\
+             // Initialize the rust-analyzer integration\n\
+             let mut rust_server = RustMcpServer::new();\n\
+             rust_server.start().await?;\n\n\
+             eprintln!(\"Starting mcp-rlsp server\");\n\
+             eprintln!(\"Server running on stdio transport...\");\n\n\
+             // Start the MCP server using the ServiceExt trait\n\
+             let service = rust_server.serve(stdio()).await?;\n\
+             service.waiting().await?;\n\n\
+             Ok(())\n}\n";
+        std::fs::write(&path, original).unwrap();
+
+        // RA-style WorkspaceEdit: changes keyed by file URI.
+        let uri = format!("file://{}", path.display());
+        let edit_json = serde_json::json!({
+            "result": {
+                "changes": {
+                    &uri: [
+                        { "range": { "start": {"line": 7, "character": 8}, "end": {"line": 7, "character": 19} }, "newText": "server" },
+                        { "range": { "start": {"line": 8, "character": 0},  "end": {"line": 8, "character": 11} }, "newText": "server" },
+                        { "range": { "start": {"line": 14, "character": 14}, "end": {"line": 14, "character": 25} }, "newText": "server" }
+                    ]
+                }
+            }
+        });
+
+        apply_workspace_edit(&edit_json).unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        // All three occurrences renamed; comments untouched.
+        assert!(!after.contains("rust_server"), "rename left a `rust_server` occurrence");
+        assert!(after.contains("// Initialize the rust-analyzer integration"),
+            "comment corrupted: {:?}", after.lines().nth(6));
+        assert!(after.contains("let mut server = RustMcpServer::new();"),
+            "declaration not renamed correctly:\n{}", after);
+        assert!(after.contains("server.start().await?"));
+        assert!(after.contains("let service = server.serve(stdio()).await?"));
+
+        let _ = std::fs::remove_file(&path);
+    }
 }
 
 fn canonicalize(file_path: &str) -> String {
