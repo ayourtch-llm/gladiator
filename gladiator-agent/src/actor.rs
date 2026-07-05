@@ -134,6 +134,60 @@ impl AgentActor {
         self
     }
 
+    /// Cross-turn loop breaker: when the agent detects that consecutive turns
+    /// are near-identical, inject a tie-breaker message with a random number.
+    /// The randomness perturbs the context enough to escape the deterministic
+    /// attractor without forcing the model to "admit defeat."
+    async fn maybe_break_cross_turn_loop(
+        &self,
+        bus: &Bus,
+        state: &Arc<tokio::sync::Mutex<ConversationState>>,
+    ) -> bool {
+        let streak = {
+            let mut s = state.lock().await;
+            s.record_turn_and_check_loop()
+        };
+        // Fire after 3 consecutive identical turns.
+        if streak < 3 {
+            return false;
+        }
+        let roll = {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut h = DefaultHasher::new();
+            std::time::SystemTime::now().hash(&mut h);
+            state.lock().await.iteration_count.hash(&mut h);
+            (h.finish() % 10000) as u32
+        };
+        let warn = Message::new(
+            &self.stream_output_topic,
+            &self.id(),
+            format!(
+                "Cross-turn loop detected: {} consecutive near-identical turns. \
+                 Injecting tie-breaker to perturb the context.",
+                streak
+            ),
+        )
+        .with_type("Warning");
+        let _ = bus.publish(&self.id(), warn).await;
+
+        let inject = format!(
+            "You have repeated the same approach {} times across turns and it is not working. \
+             You MUST try a DIFFERENT approach this time — not a minor variation of the same one. \
+             If you need a tie breaker in choosing a different approach, \
+             here is a random number for you: {}. \
+             Use it to pick between alternatives you haven't tried yet.",
+            streak, roll,
+        );
+        let _ = bus
+            .publish(
+                &self.id(),
+                Message::new(&self.input_topic, &self.id(), inject),
+            )
+            .await;
+        true
+    }
+
     /// Stuck-model triage: called when the LLM either went idle (>90s no
     /// tokens) or got caught in a think-loop by the similarity detector. Saves
     /// the partial response, warns the TUI, asks a standalone `llm_call` what
@@ -645,6 +699,8 @@ impl Actor for AgentActor {
                                     s.add_assistant_message(output);
                                     s.increment_iteration();
                                 }
+                                // Cross-turn loop detection (tie-breaker injection)
+                                let _ = self.maybe_break_cross_turn_loop(bus, &state).await;
                             }
                         }
                         Err(RecvError::Lagged(n)) => warn!("Agent {} output lagged: {}", self.index, n),
@@ -698,6 +754,8 @@ impl Actor for AgentActor {
                                 s.add_tool_calls(tool_calls.clone());
                                 s.increment_iteration();
                             }
+                            // Cross-turn loop detection (tie-breaker injection)
+                            let _ = self.maybe_break_cross_turn_loop(bus, &state).await;
 
                             for (i, tc) in tool_calls.iter().enumerate() {
                                 debug!("[agent] tool_call[{}]: {:?}", i, tc);

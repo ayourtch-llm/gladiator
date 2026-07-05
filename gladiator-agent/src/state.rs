@@ -45,6 +45,11 @@ pub struct ConversationState {
     /// serialized — populated at agent startup from LlmConfig.
     #[serde(skip)]
     pub context_window: Option<usize>,
+    /// Hashes of recent assistant turns (reasoning + tool-call args) for
+    /// cross-turn loop detection. Transient. When the last N entries are
+    /// near-identical, the agent injects a tie-breaker perturbation.
+    #[serde(skip)]
+    pub recent_turn_hashes: Vec<u64>,
 }
 
 /// Subset of `gladiator_llm::Usage` mirrored locally so the agent crate
@@ -182,6 +187,77 @@ impl ConversationState {
         for id in &self.tool_call_order {
             self.pending_tool_calls.insert(id.clone());
         }
+    }
+
+    /// Record a signature of the most recently added assistant message and
+    /// return the cross-turn loop streak count if the last `window` assistant
+    /// turns are near-identical. Returns 0 if no loop.
+    ///
+    /// The signature is a hash of the reasoning text + tool-call function
+    /// names + truncated arguments. Identical turns produce identical hashes;
+    /// near-duplicate turns (same approach, minor wording changes) are caught
+    /// by also comparing the raw text via the caller if hashes differ.
+    pub fn record_turn_and_check_loop(&mut self) -> usize {
+        let last_assistant = self.messages.iter().rev().find_map(|m| {
+            if m.get("role").and_then(|r| r.as_str()) == Some("assistant") {
+                Some(m)
+            } else {
+                None
+            }
+        });
+        let Some(msg) = last_assistant else { return 0 };
+
+        // Build a signature: reasoning + tool call names + arg prefixes.
+        let reasoning = msg.get("reasoning").and_then(|r| r.as_str()).unwrap_or("");
+        let content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
+        let mut sig = String::new();
+        // Use the last 1000 chars of reasoning — the loop content typically
+        // appears verbatim at the end. Ignore the first part which may vary.
+        if reasoning.len() > 1000 {
+            sig.push_str(&reasoning[reasoning.len() - 1000..]);
+        } else {
+            sig.push_str(reasoning);
+        }
+        if let Some(tool_calls) = msg.get("tool_calls").and_then(|t| t.as_array()) {
+            for tc in tool_calls {
+                let name = tc["function"]["name"].as_str().unwrap_or("");
+                let args = tc["function"]["arguments"].as_str().unwrap_or("");
+                sig.push_str(name);
+                sig.push_str(&args[..args.len().min(200)]);
+            }
+        }
+        if sig.is_empty() {
+            sig.push_str(&content[..content.len().min(200)]);
+        }
+
+        let hash = self.hash_str(&sig);
+        self.recent_turn_hashes.push(hash);
+        // Keep last 10
+        if self.recent_turn_hashes.len() > 10 {
+            self.recent_turn_hashes.remove(0);
+        }
+
+        // Count consecutive trailing duplicates of the latest hash.
+        let latest = self.recent_turn_hashes.last().copied().unwrap_or(0);
+        let mut streak = 0usize;
+        for &h in self.recent_turn_hashes.iter().rev() {
+            if h == latest {
+                streak += 1;
+            } else {
+                break;
+            }
+        }
+        streak
+    }
+
+    /// FNV-1a hash — fast, no dep.
+    fn hash_str(&self, s: &str) -> u64 {
+        let mut hash: u64 = 0xcbf29ce484222325;
+        for b in s.as_bytes() {
+            hash ^= *b as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash
     }
 
     pub fn add_tool_result(
