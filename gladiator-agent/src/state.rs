@@ -213,21 +213,22 @@ impl ConversationState {
         let mut sig = String::new();
         // Use the last 1000 chars of reasoning — the loop content typically
         // appears verbatim at the end. Ignore the first part which may vary.
-        if reasoning.len() > 1000 {
-            sig.push_str(&reasoning[reasoning.len() - 1000..]);
-        } else {
+        let skip = reasoning.chars().count().saturating_sub(1000);
+        if skip == 0 {
             sig.push_str(reasoning);
+        } else if let Some((idx, _)) = reasoning.char_indices().nth(skip) {
+            sig.push_str(&reasoning[idx..]);
         }
         if let Some(tool_calls) = msg.get("tool_calls").and_then(|t| t.as_array()) {
             for tc in tool_calls {
                 let name = tc["function"]["name"].as_str().unwrap_or("");
                 let args = tc["function"]["arguments"].as_str().unwrap_or("");
                 sig.push_str(name);
-                sig.push_str(&args[..args.len().min(200)]);
+                sig.push_str(&args.chars().take(200).collect::<String>());
             }
         }
         if sig.is_empty() {
-            sig.push_str(&content[..content.len().min(200)]);
+            sig.push_str(&content.chars().take(200).collect::<String>());
         }
 
         let hash = self.hash_str(&sig);
