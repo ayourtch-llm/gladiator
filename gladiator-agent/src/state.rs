@@ -263,6 +263,44 @@ impl ConversationState {
         self.iteration_count >= max
     }
 
+    /// Build a human-readable summary of the last `n` user/assistant messages,
+    /// suitable for a handoff file when max_iterations is reached.
+    pub fn recent_messages_summary(&self, n: usize) -> String {
+        let mut out: Vec<String> = Vec::new();
+        for msg in &self.messages {
+            let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("?");
+            if role == "user" || role == "assistant" {
+                let content = msg
+                    .get("content")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("(non-text content)");
+                out.push(format!("{}: {}", role, content));
+            }
+        }
+        let start = out.len().saturating_sub(n);
+        let mut summary = String::new();
+        summary.push_str(&format!(
+            "# Max-iterations handoff\n\nLast {} of {} user/assistant messages:\n\n",
+            out.len() - start,
+            out.len(),
+        ));
+        for line in &out[start..] {
+            // Truncate individual messages to keep the file readable.
+            let truncated = if line.len() > 2000 {
+                format!("{}...[truncated]", &line[..2000])
+            } else {
+                line.to_string()
+            };
+            summary.push_str(&truncated);
+            summary.push_str("\n\n---\n\n");
+        }
+        summary.push_str(&format!(
+            "\niteration_count: {} (max)\n",
+            self.iteration_count
+        ));
+        summary
+    }
+
     pub fn buffer_user_message(&mut self, message: String) {
         self.pending_messages.push(message);
     }

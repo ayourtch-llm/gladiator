@@ -151,11 +151,24 @@ impl AgentActor {
             }
         }
         if s.max_reached(self.max_iterations) {
+            let summary = s.recent_messages_summary(10);
             drop(s);
+            // Graceful recovery: persist a handoff file so the conversation
+            // can be resumed via the restart_from_file internal tool.
+            let handoff_path = "tmp/maxiter-handoff.txt";
+            if std::fs::create_dir_all("tmp").is_ok() {
+                if let Err(e) = std::fs::write(handoff_path, &summary) {
+                    warn!("Failed to write max-iter handoff: {}", e);
+                }
+            }
             let warn_msg = Message::new(
                 &self.stream_output_topic,
                 &self.id(),
-                format!("Max iterations ({}) reached", self.max_iterations),
+                format!(
+                    "Max iterations ({}) reached. Handoff saved to {}. \
+                     Use `restart_from_file {{\"path\":\"{}\"}}` to resume, or send a message to continue.",
+                    self.max_iterations, handoff_path, handoff_path,
+                ),
             )
             .with_type("Warning");
             let _ = bus.publish(&self.id(), warn_msg).await;
