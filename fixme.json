@@ -92,11 +92,16 @@
   {
     "id": "233ff5b0-e1cf-4180-ac54-724db7fac1ad",
     "phrase": "the \"Working...\" indicator starts showing only when the LLM starts outputting its content, wrongly resulting in the 'gladiator ready' during the message prefill phase, which can be long. Maybe that phase needs to be some different busy message, but with timer/progress spinner as well.",
-    "done": false
+    "done": true
   },
   {
     "id": "4d3bf427-ddf7-47db-90d8-3d0b34f62c9e",
     "phrase": "have the edit_file/plan_edits show the full diffs, in color - and not hide them.",
+    "done": false
+  },
+  {
+    "id": "7b8c0e5d-74f3-4dab-8449-a061d53a204b",
+    "phrase": "The spinner needs its own state when the agent is in the state of issuing tool calls - in case the tool calls take much time. it should probably show total tool calls, and number of completed tool calls during that moment.",
     "done": false
   }
 ]

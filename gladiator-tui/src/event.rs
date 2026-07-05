@@ -14,7 +14,7 @@ pub fn bus_to_app_message(msg: &Message) -> Option<AppMessage> {
                 Some(AppMessage::assistant(content))
             }
             // Filter out noise types
-            "LlmStreamEnd" | "LlmToolCalls" | "StreamStats" => None,
+            "LlmStreamEnd" | "LlmToolCalls" | "StreamStats" | "LlmRequestSent" => None,
             "LlmToolCall" => {
                 // Tool call building progress — parse JSON payload
                 let name = msg.payload.get("function")

@@ -42,6 +42,8 @@ pub struct App {
     ctx_used_tokens: Option<u64>,
     /// Model context window in tokens, when known.
     ctx_window: Option<usize>,
+    /// True during the prefill phase (request sent, no token received yet).
+    is_prefill: bool,
 }
 
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -65,6 +67,7 @@ impl App {
             stream_rx_chars: 0,
             ctx_used_tokens: None,
             ctx_window: None,
+            is_prefill: false,
         }
     }
 
@@ -100,6 +103,7 @@ impl App {
     /// keep spinning until an LlmStreamEnd bus message arrives.
     pub fn stop_spinner(&mut self) {
         self.is_busy = false;
+        self.is_prefill = false;
         self.spinner_frame = 0;
         self.last_spinner_advance = None;
     }
@@ -138,9 +142,10 @@ impl App {
             _ => String::new(),
         };
         if self.is_busy {
+            let label = if self.is_prefill { "Thinking..." } else { "Working..." };
             format!(
-                "{} Working...   {} chars{}",
-                SPINNER_FRAMES[self.spinner_frame], self.stream_rx_chars, ctx_part
+                "{} {}   {} chars{}",
+                SPINNER_FRAMES[self.spinner_frame], label, self.stream_rx_chars, ctx_part
             )
         } else {
             let base = self.status.clone();
@@ -388,16 +393,29 @@ impl App {
     pub fn handle_bus_message(&mut self, msg: &Message) {
         let msg_type = msg.meta_type().unwrap_or_default().to_string();
 
-        // Spinner busy tracking: LlmStream/LlmThinking → busy; LlmStreamEnd → idle
+        // Spinner busy tracking:
+        //   LlmRequestSent → busy + prefill (Thinking... before any tokens)
+        //   LlmStream/LlmThinking → busy, clear prefill
+        //   LlmStreamEnd → idle
         match msg_type.as_str() {
+            "LlmRequestSent" => {
+                self.is_busy = true;
+                self.is_prefill = true;
+                self.stream_rx_chars = 0;
+                self.spinner_frame = 0;
+                self.last_spinner_advance = None;
+            }
             "LlmStream" | "LlmThinking" => {
                 if !self.is_busy {
                     self.stream_rx_chars = 0;
                 }
                 self.is_busy = true;
+                // First token arrives — no longer in prefill.
+                self.is_prefill = false;
             }
             "LlmStreamEnd" => {
                 self.is_busy = false;
+                self.is_prefill = false;
                 self.spinner_frame = 0;
                 self.last_spinner_advance = None;
             }
@@ -421,7 +439,7 @@ impl App {
         // Filter out noise types
         if matches!(
             msg_type.as_str(),
-            "LlmStreamEnd" | "LlmToolCalls" | "StreamStats"
+            "LlmStreamEnd" | "LlmToolCalls" | "StreamStats" | "LlmRequestSent"
         ) {
             return;
         }

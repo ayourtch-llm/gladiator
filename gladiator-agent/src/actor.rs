@@ -488,6 +488,16 @@ impl AgentActor {
         bus: &Bus,
         messages: &[serde_json::Value],
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Signal the TUI that inference is starting (prefill phase). This
+        // lets the spinner show "Thinking..." before any LlmStream token
+        // arrives, so the user does not see a frozen 'gladiator ready'.
+        let prefill_msg = Message::new(
+            &self.stream_output_topic,
+            &self.id(),
+            "request_sent",
+        ).with_type("LlmRequestSent");
+        let _ = bus.publish(&self.id(), prefill_msg).await;
+
         let llm_request = LlmRequest {
             messages: Some(messages.to_vec()),
             prompt: String::new(),
