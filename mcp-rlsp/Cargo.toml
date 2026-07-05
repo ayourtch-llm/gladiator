@@ -1,0 +1,23 @@
+[package]
+name = "mcp-rlsp"
+version = "0.1.0"
+edition = "2024"
+authors = ["Dex"]
+
+# Vendored from https://github.com/dexwritescode/rust-mcp
+# Provides rust-analyzer LSP integration tools via MCP.
+
+[dependencies]
+rmcp = { version = "0.16", features = ["server", "transport-io"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "0.8"
+anyhow = "1"
+futures = "0.3"
+async-trait = "0.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin_include)'] }

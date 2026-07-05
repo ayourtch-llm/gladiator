@@ -74,8 +74,8 @@ command = ["/Users/ayourtch/rust/mcp-find-files/target/release/mcp-find-files"]
 default = true
 expose = []
 
-[mcp_servers.rustmcp]
-command = ["/Users/ayourtch/rust/rust-mcp/target/release/rustmcp"]
+[mcp_servers.mcp-rlsp]
+command = ["target/debug/mcp-rlsp"]
 default = true
 expose = []
 

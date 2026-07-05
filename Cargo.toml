@@ -8,6 +8,7 @@ members = [
     "gladiator-tui",
     "gladiator-server",
     "mcp-random",
+    "mcp-rlsp",
 ]
 resolver = "2"
 
