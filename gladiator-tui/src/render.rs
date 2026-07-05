@@ -270,8 +270,22 @@ impl Renderer {
 
         // Tool messages: no wrapping, preserve exact whitespace, apply h_offset
         if msg.role == AppMessageRole::Tool {
+            // Collapse long tool results: first N lines + ellipsis hint.
+            // bash gets a larger budget (10), other tools get 3.
+            let is_bash = msg.content.starts_with("[bash]");
+            let max_lines = if is_bash { 10 } else { 3 };
+
+            let all_lines: Vec<&str> = msg.content.split('\n').collect();
+            let truncate = all_lines.len() > max_lines + 1;
+
             let mut lines: Vec<Line> = Vec::new();
-            for (i, raw_line) in msg.content.split('\n').enumerate() {
+            let render_lines: Vec<&str> = if truncate {
+                all_lines[..max_lines].to_vec()
+            } else {
+                all_lines.clone()
+            };
+
+            for (i, raw_line) in render_lines.iter().enumerate() {
                 let chars: Vec<char> = raw_line.chars().collect();
                 let avail = if i == 0 {
                     width.saturating_sub(prefix_len).max(1)
@@ -289,6 +303,19 @@ impl Renderer {
                 spans.push(Span::styled(text, Style::default().fg(text_color)));
                 lines.push(Line::from(spans));
             }
+
+            // Append collapse hint when truncated
+            if truncate {
+                let hidden = all_lines.len() - max_lines;
+                let hint = format!("… {} more lines ({} total) — scroll right/up not available; see full output in logs", hidden, all_lines.len());
+                let mut spans: Vec<Span> = Vec::new();
+                spans.push(Span::styled(
+                    hint,
+                    Style::default().fg(self.theme.color_text_muted()).add_modifier(Modifier::DIM),
+                ));
+                lines.push(Line::from(spans));
+            }
+
             if lines.is_empty() {
                 lines.push(Line::from(vec![Span::styled(
                     prefix_str,
