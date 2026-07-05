@@ -1017,6 +1017,24 @@ impl Actor for AgentActor {
                                         }
                                     }
                                 }
+                                "retrieve_pending" => {
+                                    // Drain pending user messages from the
+                                    // conversation state and send them back to
+                                    // the TUI as a single joined string so the
+                                    // user can edit and resubmit. Clears the
+                                    // agent-side pending list atomically.
+                                    let drained = {
+                                        let mut s = state.lock().await;
+                                        s.drain_pending_messages()
+                                    };
+                                    let text = drained.join("\n");
+                                    let msg = Message::new(
+                                        &self.stream_output_topic,
+                                        &self.id(),
+                                        serde_json::json!({"text": text}),
+                                    ).with_type("RetrievedPending");
+                                    let _ = bus.publish(&self.id(), msg).await;
+                                }
                                 _ => {}
                             }
                         }

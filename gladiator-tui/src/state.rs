@@ -440,6 +440,15 @@ impl InputState {
         self.history_index = None;
     }
 
+    /// Load text into the buffer, placing cursor at end. Used by retract-to-edit
+    /// to populate the input from pending messages.
+    pub fn set_buffer(&mut self, text: &str) {
+        self.break_kill_chain();
+        self.buffer = text.to_string();
+        self.cursor = self.buffer.len();
+        self.history_index = None;
+    }
+
     pub fn submit(&mut self) -> String {
         self.break_kill_chain();
         let text = self.buffer.clone();

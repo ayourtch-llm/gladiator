@@ -123,5 +123,10 @@
     "id": "2a54f4c9-e0e9-42db-b3fc-c79576334fe3",
     "phrase": "a tweak: if the user has been using up/down to check history, interpret the up/down as history controls even in multiline messages, until any other navigation is done within the multiline - then start treating up/down as the line navigation.",
     "done": true
+  },
+  {
+    "id": "9c26158a-329d-4392-8209-798da6f202da",
+    "phrase": "when there are pending messages shown in the TUI, it would be great to be able to \"retract them to edit\" upon pressing of up arrow in the TUI - investigate if that is something doable - press up arrow and retract all of the pending messages as a single one for editing, and clear the pending messages list, and then when done editing, resubmit the message.",
+    "done": true
   }
 ]

@@ -71,6 +71,12 @@ pub struct App {
     /// Right, Backspace, char insert, Home/End, etc.) so that subsequent
     /// Up/Down revert to visual line movement.
     up_down_history_mode: bool,
+
+    /// Set when the user presses Up with pending messages and an empty input
+    /// buffer — signals run_app to publish a "retrieve_pending" command on the
+    /// agent's state_control topic. The agent drains its own pending list and
+    /// sends back a RetrievedPending message that populates the editor.
+    retract_requested: bool,
 }
 
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -101,6 +107,7 @@ impl App {
             prefill_history: Vec::new(),
             current_request_input_tokens: None,
             up_down_history_mode: false,
+            retract_requested: false,
         }
     }
 
@@ -308,6 +315,15 @@ impl App {
         self.pending_messages.clear();
     }
 
+    /// Returns true if a pending-message retraction was requested by the last
+    /// key event (Up arrow with non-empty pending list and empty input).
+    /// Resets the flag so it's only consumed once.
+    pub fn take_retract_request(&mut self) -> bool {
+        let v = self.retract_requested;
+        self.retract_requested = false;
+        v
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<String> {
         let ctrl = key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(crossterm::event::KeyModifiers::ALT);
@@ -437,6 +453,18 @@ impl App {
                 None
             }
             KeyCode::Up => {
+                // Retract pending messages into the editor for editing:
+                // when there are pending messages and the input buffer is empty,
+                // Up signals run_app to request "retrieve_pending" from the
+                // agent. The agent drains its own pending list (so both sides
+                // stay in sync) and sends back a RetrievedPending message that
+                // populates the editor for editing.
+                if !self.pending_messages.is_empty() && self.input.buffer().is_empty() {
+                    self.clear_pending_messages();
+                    self.up_down_history_mode = false;
+                    self.retract_requested = true;
+                    return None;
+                }
                 let is_multi = self.input.is_multiline(self.terminal_width, InputState::PROMPT_LEN);
                 if !is_multi || self.up_down_history_mode {
                     // Single-line: always history. Multi-line + sticky mode:
@@ -629,6 +657,17 @@ impl App {
             if !text.is_empty() {
                 self.display_pending_message(&text);
             }
+            return;
+        }
+
+        // Handle retrieved pending messages (from agent's retrieve_pending
+        // state-control command): load the joined text into the input buffer
+        // for editing and resubmission.
+        if msg_type == "RetrievedPending" {
+            let text = msg.payload.get("text")
+                .and_then(|t| t.as_str())
+                .unwrap_or_default();
+            self.input.set_buffer(text);
             return;
         }
 
@@ -1144,6 +1183,16 @@ pub async fn run_app(
                                 } else {
                                     let _ = user_input_tx.send(text);
                                 }
+                            } else if app.take_retract_request() {
+                                // Up arrow with pending messages: ask the agent
+                                // to drain its own pending list and send back a
+                                // RetrievedPending message that populates the editor.
+                                let msg = Message::new(
+                                    &topics.agent_state_control,
+                                    "gladiator-tui",
+                                    serde_json::json!({"type": "retrieve_pending", "agent_id": "gladiator-agent-0"}),
+                                );
+                                let _ = bus.publish("gladiator-tui", msg).await;
                             }
                         }
                     }

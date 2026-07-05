@@ -8,6 +8,7 @@ use gladiator_tui::state::{
     AppMessage, AppMessageRole, ChatState, InputState, ScrollState,
 };
 use gladiator_tui::event::bus_to_app_message;
+use gladiator_tui::app::App;
 
 // --- Theme tests ---
 
@@ -330,6 +331,37 @@ fn input_state_paste_then_continue_typing() {
     assert_eq!(input.cursor(), 11);
 }
 
+// --- set_buffer tests ---
+
+#[test]
+fn input_state_set_buffer_loads_text() {
+    let mut input = InputState::new();
+    input.set_buffer("retracted text");
+    assert_eq!(input.buffer(), "retracted text");
+    assert_eq!(input.cursor(), "retracted text".len());
+}
+
+#[test]
+fn input_state_set_buffer_multiline() {
+    let mut input = InputState::new();
+    input.insert_char('x');
+    input.set_buffer("line1\nline2");
+    assert_eq!(input.buffer(), "line1\nline2");
+    // Cursor at end
+    assert_eq!(input.cursor(), 11);
+}
+
+#[test]
+fn input_state_set_buffer_clears_history_index() {
+    let mut input = InputState::new();
+    input.insert_str("first");
+    let _ = input.submit(); // pushes to history, clears buffer
+    input.history_prev();   // loads "first" into buffer, sets history_index
+    assert_eq!(input.buffer(), "first");
+    input.set_buffer("replaced");
+    assert_eq!(input.buffer(), "replaced");
+}
+
 // --- ScrollState tests ---
 
 #[test]
@@ -632,4 +664,66 @@ fn event_unknown_type_returns_none() {
     let msg = Message::text("unknown", "agent", "something");
     let app_msg = bus_to_app_message(&msg);
     assert!(app_msg.is_none());
+}
+
+// --- Retract pending messages tests ---
+
+#[test]
+fn retract_request_flag_set_on_up_with_pending_and_empty_input() {
+    use crossterm::event::{KeyEvent, KeyCode, KeyModifiers};
+    let mut app = App::new(Theme::default_dark());
+    // Add a pending message
+    app.add_pending_message("hello world".to_string());
+
+    // Press Up — should set retract_requested and clear local pending list.
+    assert!(!app.take_retract_request()); // initially false
+    let _ = app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    assert!(app.pending_messages().is_empty(), "local pending cleared");
+    assert!(app.take_retract_request(), "retract flag set after Up key");
+}
+
+#[test]
+fn retract_not_triggered_with_nonempty_input() {
+    use crossterm::event::{KeyEvent, KeyCode, KeyModifiers};
+    let mut app = App::new(Theme::default_dark());
+    // Add a pending message and some input text
+    app.add_pending_message("hello".to_string());
+    app.input_mut().insert_str("draft");
+
+    let _ = app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    assert!(!app.take_retract_request(), "retract not triggered with non-empty buffer");
+}
+
+#[test]
+fn retract_not_triggered_with_no_pending() {
+    use crossterm::event::{KeyEvent, KeyCode, KeyModifiers};
+    let mut app = App::new(Theme::default_dark());
+
+    let _ = app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    assert!(!app.take_retract_request(), "retract not triggered with no pending");
+}
+
+#[test]
+fn retract_flag_resets_after_consume() {
+    use crossterm::event::{KeyEvent, KeyCode, KeyModifiers};
+    let mut app = App::new(Theme::default_dark());
+    app.add_pending_message("msg".to_string());
+
+    let _ = app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    assert!(app.take_retract_request(), "first consume should be true");
+    // Second call resets to false
+    assert!(!app.take_retract_request(), "second consume should be false");
+}
+
+#[test]
+fn retrieved_pending_loads_into_input() {
+    let mut app = App::new(Theme::default_dark());
+
+    // Simulate agent sending back RetrievedPending with joined text as JSON
+    let msg = Message::new("agent:stream", "gladiator-agent-0",
+        serde_json::json!({"text": "line1\nline2"}))
+        .with_type("RetrievedPending");
+    app.handle_bus_message(&msg);
+
+    assert_eq!(app.input().buffer(), "line1\nline2");
 }

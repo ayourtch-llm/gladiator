@@ -110,5 +110,17 @@
   {
     "id": "c3e65527-a9e5-4445-b671-c9804a9d8430",
     "text": "Plan to fix progressive tool-call display + coalescing with results for multiple tools in flight:\n\n1. Add `index: usize` field to LlmEvent::ToolInputStart/Delta/End (event.rs), pass through from openai_chat.rs.\n2. actor.rs ToolInputStart/Delta handlers: bind id+name, publish `\"id\"` and `\"index\"` alongside name+args in the LlmToolCall payload so TUI can key per-call by stable identifier instead of just \"last message\".\n3. AppMessage gains optional `tool_id` field for matching tool calls across streaming deltas + result coalescing.\n4. app.rs: replace single `last_tool_call_index` with a map/scan-backwards-by-id approach to find the right Tool line to update, even when multiple are in flight interleaved.\n5. Agent dispatch \"Calling tool:\" Info and LlmToolResult need id threaded so TUI can match them back to the streamed [tool] placeholder — include `id` field in those payloads (structured JSON or parseable format).\n6. When result arrives, coalesce: append/replace into existing Tool message rather than adding new line.\n\nKey files: gladiator-llm/src/event.rs, gladiator-llm/src/openai_chat.rs, gladiator-llm/src/actor.rs, gladiator-tui/src/state.rs (AppMessage), gladiator-tui/src/app.rs, gladiator-agent/src/actor.rs."
+  },
+  {
+    "id": "d1f021f3-61f1-4be4-bc87-278fe8b86032",
+    "text": "Starting work on fixme 7f4b40c7: Thinking indicator ETA based on past reasoning durations × new-info ratio, with cache-miss fallback re-baseline. Need to inspect TUI status/spinner state (is_prefill/is_busy), StreamStats/usage tracking, and where LlmThinking events flow through app.rs handle_bus_message."
+  },
+  {
+    "id": "c4f37ec2-141c-492f-b7d5-e88d8e39a5b7",
+    "text": "Vendored mcp-random into the gladiator workspace as a local crate at `mcp-random/`. Updated Cargo.toml members list. Rewrote `gladiator-tools/tests/mcp_test.rs` to find binary via current_exe traversal (no hardcoded path), added 6 new tests (discovery, UUID format, string params, expose filter, error handling, parameter JSON). All workspace tests pass: mcp-random's own 85 unit tests + gladiator-tools' 7 MCP integration tests. Committed as `0149520` on branch `orefactor`."
+  },
+  {
+    "id": "957e9449-a729-4765-b326-45bb985b4253",
+    "text": "Fixme 9c26158a: \"retract pending messages to edit on Up arrow\". Pending messages are stored in App.pending_messages (Vec<String>), displayed above editor. Agent buffers them via UserMessageQueued events when busy, drains via advance_turn_if_resolved after tool calls complete. To implement retract-to-edit: on Up key press with non-empty pending_messages and empty input buffer, join all pending into one string separated by newlines, load into InputState.buffer, clear pending_messages list. No agent-side change needed — just TUI handle_key + a method to set the input buffer from a string (InputState.set_buffer). Need: add set_buffer() to InputState, modify Up handler in app.rs to check pending_messages first."
   }
 ]
