@@ -350,22 +350,32 @@ impl AgentActor {
         subagent_stack: &Arc<Mutex<Vec<SubagentFrame>>>,
     ) {
         let mut s = state.lock().await;
+        info!("Agent {} advance_turn_if_resolved depth={} all_resolved={} pending_msgs={} pending_tools={}",
+              self.index, s.subagent_depth, s.all_tool_calls_resolved(),
+              s.pending_messages.len(), s.pending_tool_calls.len());
         if !s.all_tool_calls_resolved() {
             return;
         }
         let pending = s.drain_pending_messages();
+        info!("Agent {} advance_turn_if_resolved drained {} pending message(s)",
+              self.index, pending.len());
         if !pending.is_empty() {
             s.reset_iteration();
+            let depth = s.subagent_depth;
             for m in &pending {
                 s.add_user_message(m.clone());
-                let displayed_msg = Message::new(
+                let mut displayed_msg = Message::new(
                     &self.stream_output_topic,
                     &self.id(),
                     m.clone(),
                 )
                 .with_type("UserMessageDisplayed");
-                let displayed_msg = self.stamp_depth(displayed_msg, state).await;
+                if depth > 0 {
+                    displayed_msg = displayed_msg.with_depth(depth);
+                }
+                drop(s);
                 let _ = bus.publish(&self.id(), displayed_msg).await;
+                s = state.lock().await;
             }
         }
         if s.max_reached(self.max_iterations) {
@@ -784,6 +794,14 @@ impl AgentActor {
             stack.pop().unwrap()
         };
 
+        // Diagnostic: log pending messages at pop time.
+        {
+            let s = state.lock().await;
+            info!("Agent {} pop_subagent: depth={} pending_msgs={} pending_tools={} inference={}",
+                  self.index, s.subagent_depth, s.pending_messages.len(),
+                  s.pending_tool_calls.len(), s.inference_in_flight);
+        }
+
         // Restore parent state. The saved_state already contains the assistant
         // message with tool_calls=[{id:"call-X", function:{name:"call_subagent"}}]
         // and pending_tool_calls={"call-X"}. We need to find that id so we can
@@ -995,8 +1013,13 @@ impl Actor for AgentActor {
 
                             {
                                 let mut s = state.lock().await;
+                                info!("Agent {} input_rx depth={} inference_in_flight={} pending_tool_calls={} pending_messages={}",
+                                      self.index, s.subagent_depth, s.inference_in_flight,
+                                      s.pending_tool_calls.len(), s.pending_messages.len());
                                 if !s.pending_tool_calls.is_empty() || s.inference_in_flight {
                                     s.buffer_user_message(user_message.clone());
+                                    info!("Agent {} buffered to pending (now {} messages)",
+                                          self.index, s.pending_messages.len());
                                     drop(s);
                                     // Notify TUI that this message is queued (pending)
                                     let queued_msg = Message::new(
@@ -1102,6 +1125,13 @@ impl Actor for AgentActor {
                                 // Subagent completion detection: when inner
                                 // conversation produces a text-only response (no pending tool calls) and we're at depth > 0, pop back to parent.
                                 if !subagent_stack.lock().await.is_empty() {
+                                    let stack_depth = {
+                                        let s = state.lock().await;
+                                        info!("Agent {} text-response subagent check: depth={} inference={} pending_tools={} pending_msgs={}",
+                                              self.index, s.subagent_depth, s.inference_in_flight,
+                                              s.pending_tool_calls.len(), s.pending_messages.len());
+                                        s.subagent_depth
+                                    };
                                     // Before popping, check if the user sent
                                     // messages to steer the subagent. If so,
                                     // drain them into the subagent's
@@ -1145,6 +1175,8 @@ impl Actor for AgentActor {
                                             s.subagent_depth > 0 && !s.inference_in_flight && s.all_tool_calls_resolved()
                                         };
                                         if should_pop {
+                                            info!("Agent {} popping subagent at depth {} (no pending messages)",
+                                                  self.index, stack_depth);
                                             self.pop_subagent(&state, &subagent_stack, bus,
                                                 output_for_pop).await;
                                         } else {
