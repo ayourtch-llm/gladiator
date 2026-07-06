@@ -793,16 +793,15 @@ impl AgentActor {
         // and pending_tool_calls={"call-X"}. We need to find that id so we can
         // add a matching tool result.
         let depth_after;
+        let mut subagent_tc_id: Option<String> = None;
         {
             let mut s = state.lock().await;
             *s = frame.saved_state.clone();
             s.subagent_depth = s.subagent_depth.saturating_sub(1);
             depth_after = s.subagent_depth;
 
-            // Find the call_subagent's tool_call_id by scanning for it in
-            // messages. The last assistant message with a "call_subagent"
-            // function name is ours.
-            let mut subagent_tc_id: Option<String> = None;
+            // Find the call_subagent's tool_call_id and stash it for the
+            // display message published after this block.
             for msg in &s.messages {
                 if msg.get("role").and_then(|r| r.as_str()) == Some("assistant") {
                     if let Some(tcs) = msg.get("tool_calls").and_then(|t| t.as_array()) {
@@ -819,9 +818,9 @@ impl AgentActor {
             }
 
             match subagent_tc_id {
-                Some(id) => {
-                    s.add_tool_result(&id, "call_subagent", &result_text, true);
-                    s.resolve_tool_call(&id);
+                Some(ref id) => {
+                    s.add_tool_result(id, "call_subagent", &result_text, true);
+                    s.resolve_tool_call(id);
                 }
                 None => {
                     warn!("Agent {}: pop_subagent could not find call_subagent tool_call_id in restored state — result will be lost",
@@ -831,6 +830,24 @@ impl AgentActor {
 
             // Clear the active_system_message override since we're back to parent.
             s.active_system_message = None;
+        }
+
+        // Publish a display message so the TUI can coalesce the result into
+        // the [tool] placeholder for call_subagent.
+        if let Some(id) = subagent_tc_id.as_ref() {
+            let display = format!(
+                "  [tool_result] call_subagent({}) => {}",
+                id,
+                result_text.chars().take(500).collect::<String>()
+            );
+            let depth_for_stamp = depth_after;
+            let display_msg = Message::new(
+                &self.stream_output_topic,
+                &self.id(),
+                display,
+            ).with_type("LlmToolResult");
+            let display_msg = self.stamp_depth_sync(display_msg, depth_for_stamp);
+            let _ = bus.publish(&self.id(), display_msg).await;
         }
 
         info!(

@@ -116,6 +116,9 @@ pub fn bus_to_app_message(msg: &Message) -> Option<AppMessage> {
                     Some(AppMessage::error(message))
                 }
             }
+            "SubagentStart" | "SubagentEnd" => {
+                Some(AppMessage::system(content))
+            }
             "Log" => Some(AppMessage::system(content)),
             "Interrupt" => Some(AppMessage::system(format!(
                 "[interrupt] {}",
