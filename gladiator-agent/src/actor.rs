@@ -1257,11 +1257,39 @@ impl Actor for AgentActor {
                 result = tool_calls_rx.recv() => {
                     match result {
                         Ok(msg) => {
-                            let tool_calls: Vec<serde_json::Value> = match &msg.payload {
+                            let mut tool_calls: Vec<serde_json::Value> = match &msg.payload {
                                 serde_json::Value::Array(arr) => arr.clone(),
                                 serde_json::Value::Object(_) => continue,
                                 _ => continue,
                             };
+
+                            // Some endpoints return the same tool_call id for
+                            // every tool in a batch. Deduplicate by suffixing
+                            // duplicates with __dupN so each tool call has a
+                            // unique id — otherwise resolve_tool_call fires
+                            // advance_turn_if_resolved prematurely (after the
+                            // first result), causing consecutive assistant
+                            // messages and 400 errors from the provider.
+                            {
+                                let mut seen = std::collections::HashSet::new();
+                                for (i, tc) in tool_calls.iter_mut().enumerate() {
+                                    let raw = tc["id"].as_str().unwrap_or("").to_string();
+                                    let id = if raw.is_empty() {
+                                        format!("__idx_{}", i)
+                                    } else {
+                                        raw
+                                    };
+                                    let unique = if seen.contains(&id) {
+                                        format!("{}__dup{}", id, i)
+                                    } else {
+                                        id
+                                    };
+                                    seen.insert(unique.clone());
+                                    if let Some(obj) = tc.as_object_mut() {
+                                        obj.insert("id".into(), serde_json::Value::String(unique));
+                                    }
+                                }
+                            }
 
                             {
                                 let mut s = state.lock().await;
