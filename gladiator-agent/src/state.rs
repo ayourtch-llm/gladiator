@@ -496,6 +496,16 @@ impl ConversationState {
             }
             result.push(m);
         }
+        // Doctor outgoing tool_calls arguments to prevent HTTP 500 from
+        // corrupted JSON in conversation history.
+        let repairs = crate::outgoing_doctor::doctor_messages(&mut result);
+        for r in &repairs {
+            tracing::warn!(
+                "[outgoing-doctor] msg[{}]: dropped broken {} (args unparseable)",
+                r.msg_index,
+                if r.tool_names.len() == 1 { r.tool_names[0].clone() } else { format!("batch of {}", r.tool_names.len()) },
+            );
+        }
         result
     }
 

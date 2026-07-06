@@ -162,12 +162,12 @@
   {
     "id": "dec1dfd7-55ff-4827-a1ee-b04a7d9b7c94",
     "phrase": "organize_imports tool fails with \"No organize-imports code action available\" on mcp-rlsp/src/main.rs even though imports are out of order. Root cause likely: (1) create_code_action_params passes context.only=[\"source.organizeImports\"] but rust-analyzer may not advertise that literal, or (2) the full-range computation uses line_count via .lines().count() which counts lines without trailing newline correctly but end char u32::MAX is invalid for RA. See mcp-rlsp/src/analyzer/client.rs organize_imports() and create_code_action_params in protocol.rs. Debug by capturing raw codeAction response JSON from RA to see what kinds it returns, then match against source.organizeImports or source.sortMembers.",
-    "done": false
+    "done": true
   },
   {
     "id": "a88584e0-5569-4f02-a9a5-9e474394e38b",
     "phrase": "get_type_hierarchy tool always returns \"No type hierarchy at <file:line:char>\" for structs with impl blocks (tested on RustMcpServer). Root cause likely in prepareTypeHierarchy response handling — client.rs get_type_hierarchy() checks `response.get(\"result\").as_array()` but RA may return null or the cursor position isn't on a valid type symbol. Also possible: did_open was called but indexing not complete before prepare request fired (no wait for diagnostics/publishDiagnostics). See mcp-rlsp/src/analyzer/client.rs get_type_hierarchy() and prepare_type_hierarchy_params in protocol.rs. Fix: add retry/wait after didOpen, verify cursor is on a struct/enum/trait keyword or type name, log raw RA response to diagnose empty result array vs null.",
-    "done": false
+    "done": true
   },
   {
     "id": "06d07481-1c97-44ea-9ff5-f9b0eb8ec2a3",
@@ -177,7 +177,7 @@
   {
     "id": "74c02606-b7da-40c8-8cb5-6539488f6e98",
     "phrase": "extract_function and inline_function tools are untested end-to-end. Both use codeAction requests via execute_code_action which calls apply_workspace_edit — same path as rename_symbol that had the pos_to_index off-by-one bug (now fixed). Need integration tests similar to apply_workspace_edit_renames_all_occurrences_correctly but for extract/inline scenarios, OR manual verification after MCP server restart. See mcp-rlsp/src/analyzer/client.rs extract_function() and inline_function(). Also: execute_code_action has a fallback path that calls workspace/executeCommand — verify RA actually supports command-based code actions or if only edit-based ones work.",
-    "done": false
+    "done": true
   },
   {
     "id": "16728959-0e8f-4a11-b2b4-9562d7510481",
@@ -192,7 +192,7 @@
   {
     "id": "beaa7daa-970b-40e0-a332-382c98551667",
     "phrase": "RA returns null for ALL LSP queries on this workspace — find_definition, documentSymbol, hover, workspace/symbol all return result:null. Works fine on standalone temp projects and minimal 1-crate workspaces in /tmp. Root cause is project-specific: possibly the virtual manifest with \".\" as a member alongside path-dependency subcrates confuses RA's project discovery (cargo metadata succeeds but RA never loads source files). Tried: workspaceFolders, linkedProjects via initializationOptions, rootPath+rootUri combo, 120s wait — all still null. Next approach to try: generate rust-project.json manually OR remove \".\" from workspace members and see if that fixes it. See mcp-rlsp/tests/lsp_integration_test.rs for diagnostic tests.\"",
-    "done": false
+    "done": true
   },
   {
     "id": "4e835d41-36ac-4891-b532-ca5e0dfb009b",
@@ -208,5 +208,60 @@
     "id": "68252ebe-80ee-479c-b4bb-bff636cd2669",
     "phrase": "vendor the ./tmp/open-strix-rust/mcp-pdf-server",
     "done": true
+  },
+  {
+    "id": "10d72181-323a-4405-b3ff-5404e6647c56",
+    "phrase": "Pasting the text results in a very very slow character-by-character insertion; we should improve the performance of that - and maybe treat the large amount of text somehow specially, without per-char screen redraw ?",
+    "done": false
+  },
+  {
+    "id": "24a35580-9977-4e49-9812-5eb47fab24b9",
+    "phrase": "add command to show what is going on with the ptys - should it be universal /mcp call ... command with different names of servers and tab completion for functions/arguments, and \"?\" help ?",
+    "done": false
+  },
+  {
+    "id": "43514dcb-641d-4a1c-8136-6a1d208c5120",
+    "phrase": "please implement outgoing request doctoring as per tmp/outgoing-request-doctoring.md",
+    "done": true
+  },
+  {
+    "id": "4353a71e-2658-4294-9d3a-38942175ad8c",
+    "phrase": "As part of the context refresh, agent also needs to write a file surprises.md, which would contain all the surprizes it encountered in the session so far, and then perform the five-why analysis on them according to  tmp/five-whys.md",
+    "done": false
+  },
+  {
+    "id": "60447fbd-6ffd-4108-a1dc-fe948bd3c844",
+    "phrase": "mcp-loader seems to have an issue with arguments: The tagged_fileops tools work but the MCP call interface seems to have argument passing issues — likely because gladiat or's `mcp_call` wraps args differently than direct JSON-RPC. could we take care of that ?",
+    "done": false
+  },
+  {
+    "id": "50f9822f-33a4-4215-862b-74842c658c10",
+    "phrase": "Could we have the result of [tool] entry and the tool call result entry be presented in aesthetically pleasing and readable way - like, a nice red-green diff in case it is an edit, or a command + its result if it was a command run ?",
+    "done": false
+  },
+  {
+    "id": "e5d0a184-0549-4184-bb16-a74e7e33d119",
+    "phrase": "Could we have the counter of chars returned be seen in the UI similar to the state of \"Working...\" in the state where we are accumulating a tool call ?",
+    "done": false
+  },
+  {
+    "id": "4b4b92b5-6683-4bf4-a8ed-a6235be59d65",
+    "phrase": "add an internal tool to manipulate \"context reminders\": a warning thresholds, which, when crossed, would cause a one-time injection of the configurable message into the agent loop",
+    "done": false
+  },
+  {
+    "id": "270d1cfe-2836-4d8d-ac40-dad71da16d57",
+    "phrase": "add one-time and cron wake-ups: configurable messages that would be injected into the agent loop on schedule - also be able to inject those only if the loop is idle, and cancel otherwise.",
+    "done": false
+  },
+  {
+    "id": "d9d742bb-8d28-4c9f-98a6-d3e541069f9b",
+    "phrase": "add ability to use rust-analyzer on multiple projects at once, not just the main project root - or at least switch between the two. Have the tools to query active project(s) and to switch them.",
+    "done": false
+  },
+  {
+    "id": "f1a2b3c4-0001-4000-8000-0000000000fe",
+    "phrase": "If a user sends a pending message (while agent is busy) and then presses ESC-ESC to interrupt, the pending message remains stuck in pending_messages forever. The interrupt path should drain/clear pending messages so they do not accumulate and confuse the agent on the next turn.",
+    "done": false
   }
 ]

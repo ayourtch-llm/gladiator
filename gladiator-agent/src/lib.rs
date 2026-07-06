@@ -1,5 +1,6 @@
 pub mod actor;
 pub mod internal_tools;
+pub mod outgoing_doctor;
 pub mod persistence;
 pub mod state;
 
