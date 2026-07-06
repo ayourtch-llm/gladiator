@@ -334,6 +334,56 @@ impl Renderer {
                 return lines;
             }
 
+            // Todo tool results: render all lines without collapsing, with
+            // status-colored checkboxes. The todo list is meant to be seen
+            // in full — truncating it defeats the purpose.
+            let is_todo = match msg.tool_kind.as_ref() {
+                Some(crate::state::ToolKind::Todo) => true,
+                _ => false,
+            };
+            if is_todo {
+                let all_lines: Vec<&str> = msg.content.split('\n').collect();
+                let mut lines: Vec<Line> = Vec::new();
+
+                for (i, raw_line) in all_lines.iter().enumerate() {
+                    // Color the status glyph based on [x], [~], or [ ]
+                    let line_color = if raw_line.contains("[x]") || raw_line.contains("✓") {
+                        self.theme.color_success()
+                    } else if raw_line.contains("[~]") || raw_line.contains("~") {
+                        self.theme.color_warning()
+                    } else if raw_line.starts_with("(todo list is empty)") {
+                        self.theme.color_text_muted()
+                    } else {
+                        text_color
+                    };
+
+                    let chars: Vec<char> = raw_line.chars().collect();
+                    let avail = if i == 0 {
+                        width.saturating_sub(prefix_len).max(1)
+                    } else {
+                        width.max(1)
+                    };
+                    let start = h_offset.min(chars.len());
+                    let end = (start + avail).min(chars.len());
+                    let text: String = chars[start..end].iter().collect();
+
+                    let mut spans: Vec<Span> = Vec::new();
+                    if i == 0 && !prefix_str.is_empty() {
+                        spans.push(Span::styled(prefix_str.clone(), Style::default().fg(prefix_color)));
+                    }
+                    spans.push(Span::styled(text, Style::default().fg(line_color)));
+                    lines.push(Line::from(spans));
+                }
+
+                if lines.is_empty() {
+                    lines.push(Line::from(vec![Span::styled(
+                        prefix_str,
+                        Style::default().fg(prefix_color),
+                    )]));
+                }
+                return lines;
+            }
+
             // Collapse long tool results: first N lines + ellipsis hint.
             // Command tools (bash/run_command) get a larger budget, others 3.
             let is_bash = match msg.tool_kind.as_ref() {

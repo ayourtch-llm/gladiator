@@ -17,6 +17,8 @@ pub enum ToolKind {
     Edit,
     /// bash / run_command — rendered as "$ command" with larger line budget
     Bash,
+    /// todo_write / todo_read — rendered as compact checkbox list, no collapse
+    Todo,
     /// All other tools (read_file, grep, find_files, mcp_*, etc.)
     Other,
 }
@@ -757,6 +759,7 @@ pub fn classify_tool(name: &str) -> ToolKind {
     match name {
         "edit_file" | "apply_edits" | "plan_edits" => ToolKind::Edit,
         "bash" | "run_command" => ToolKind::Bash,
+        "todo_write" | "todo_read" => ToolKind::Todo,
         _ => ToolKind::Other,
     }
 }
