@@ -1153,8 +1153,41 @@ impl Actor for AgentActor {
                                         }
                                     }
                                 } else {
-                                    // Cross-turn loop detection (tie-breaker injection)
-                                    let _ = self.maybe_break_cross_turn_loop(bus, &state).await;
+                                    // Depth 0 (no subagent): drain pending messages
+                                    // the same way — after a text-only response,
+                                    // user messages that arrived during inference
+                                    // should start a new turn.
+                                    let pending = {
+                                        let mut s = state.lock().await;
+                                        s.drain_pending_messages()
+                                    };
+                                    if !pending.is_empty() {
+                                        for m in &pending {
+                                            let mut s = state.lock().await;
+                                            s.add_user_message(m.clone());
+                                            drop(s);
+                                            let displayed = Message::new(
+                                                &self.stream_output_topic,
+                                                &self.id(),
+                                                m.clone(),
+                                            ).with_type("UserMessageDisplayed");
+                                            let _ = bus.publish(&self.id(), displayed).await;
+                                        }
+                                        info!("Agent {}: {} pending user message(s) delivered after text response",
+                                              self.index, pending.len());
+                                        let messages = {
+                                            let s = state.lock().await;
+                                            s.build_messages_with_system(&self.system_message)
+                                        };
+                                        {
+                                            let mut s = state.lock().await;
+                                            s.inference_in_flight = true;
+                                        }
+                                        let _ = self.send_conversation(bus, &messages).await;
+                                    } else {
+                                        // Cross-turn loop detection (tie-breaker injection)
+                                        let _ = self.maybe_break_cross_turn_loop(bus, &state).await;
+                                    }
                                 }
                             }
                         }
