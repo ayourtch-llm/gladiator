@@ -83,6 +83,8 @@ pub struct McpServerState {
     status: Arc<Mutex<ServerStatus>>,
     retry_count: Mutex<usize>,
     log_ring: Arc<StderrLogRing>,
+    /// Number of tools discovered during the last successful spawn/respawn.
+    tool_count: std::sync::atomic::AtomicUsize,
 }
 
 impl McpServerState {
@@ -94,6 +96,7 @@ impl McpServerState {
             status: Arc::new(Mutex::new(ServerStatus::Starting)),
             retry_count: Mutex::new(0),
             log_ring: Arc::new(StderrLogRing::new()),
+            tool_count: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -128,8 +131,9 @@ impl McpManager {
             let status = state.status().await;
             let retries = *state.retry_count.lock().await;
             out.push_str(&format!(
-                "- {} [{}], retries={}\n",
+                "- {} [{}], retries={}, tools={}\n",
                 state.name, status, retries,
+                state.tool_count.load(std::sync::atomic::Ordering::Relaxed),
             ));
         }
         if filter.is_some() {
@@ -165,7 +169,11 @@ impl McpManager {
             config: state.config.clone(),
         };
         match runner.spawn_with_log(&state.peer_slot, state.log_ring.clone(), Arc::clone(&state.status)).await {
-            Ok(_tools) => {
+            Ok(tools) => {
+                state.tool_count.store(
+                    tools.len(),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 *state.status.lock().await = ServerStatus::Running;
                 info!("MCP server '{}' manually restarted", name);
                 Ok(format!("Restarted MCP server '{}'", name))
@@ -206,6 +214,10 @@ impl McpManager {
             match initial_spawn(&state).await {
                 Ok(server_tools) => {
                     info!("MCP server '{}' started, {} tools", name, server_tools.len());
+                    state.tool_count.store(
+                        server_tools.len(),
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
                     for t in server_tools { tools.push(t); }
                     states.push(state);
                 }
@@ -293,7 +305,11 @@ async fn supervise(state: Arc<McpServerState>) {
             config: state.config.clone(),
         };
         match runner.spawn_with_log(&state.peer_slot, state.log_ring.clone(), Arc::clone(&state.status)).await {
-            Ok(_tools) => {
+            Ok(tools) => {
+                state.tool_count.store(
+                    tools.len(),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 *state.status.lock().await = ServerStatus::Running;
                 *state.retry_count.lock().await = 0;
                 consecutive_failures = 0;
@@ -473,7 +489,7 @@ impl Tool for McpToolWithSlot {
 
         debug!("[mcp-tool] executing {} with args: {:?}", self.name, arguments);
         let result = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(120),
             peer.call_tool(call_params)
         ).await;
 
@@ -488,7 +504,7 @@ impl Tool for McpToolWithSlot {
                 } else { Ok(content) }
             }
             Ok(Err(e)) => Err(format!("MCP call failed: {}", e)),
-            Err(_) => Err("MCP tool call timed out after 10 seconds".to_string()),
+            Err(_) => Err("MCP tool call timed out after 120 seconds".to_string()),
         }
     }
 }
@@ -527,8 +543,7 @@ impl Tool for McpStatusTool {
             out.push_str(&format!(
                 "- {} [{}], retries={}, tools={}\n",
                 state.name, status, retries,
-                // tool count not tracked here post-spawn for simplicity
-                "?"
+                state.tool_count.load(std::sync::atomic::Ordering::Relaxed),
             ));
         }
         if filter.is_some() {
@@ -589,7 +604,11 @@ impl Tool for McpRestartTool {
             config: state.config.clone(),
         };
         match runner.spawn_with_log(&state.peer_slot, state.log_ring.clone(), Arc::clone(&state.status)).await {
-            Ok(_tools) => {
+            Ok(tools) => {
+                state.tool_count.store(
+                    tools.len(),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 *state.status.lock().await = ServerStatus::Running;
                 info!("MCP server '{}' manually restarted", name);
                 Ok(format!("Restarted MCP server '{}'", name))
