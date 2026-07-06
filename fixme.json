@@ -232,7 +232,7 @@
   {
     "id": "60447fbd-6ffd-4108-a1dc-fe948bd3c844",
     "phrase": "mcp-loader seems to have an issue with arguments: The tagged_fileops tools work but the MCP call interface seems to have argument passing issues — likely because gladiat or's `mcp_call` wraps args differently than direct JSON-RPC. could we take care of that ?",
-    "done": false
+    "done": true
   },
   {
     "id": "50f9822f-33a4-4215-862b-74842c658c10",

@@ -88,17 +88,18 @@ struct UnloadParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct CallParams {
     /// Name of a previously-loaded server.
-    server: String,
+    #[serde(default)]
+    server: Option<String>,
     /// Tool name on that server.
-    tool: String,
-    /// JSON object of arguments for the tool (or omit for none).
-    /// NOTE: schema overridden to a typed object — a bare serde_json::Value
-    /// generates an untyped {default:null} schema that strict OpenAI backends
-    /// (llama.cpp / Qwen) reject with "Unrecognized schema". A map renders as
-    /// {"type":"object"}, which they accept. Field stays Value (usage unchanged).
+    #[serde(default)]
+    tool: Option<String>,
+    /// JSON object of arguments for the sub-tool. If omitted or null, any
+    /// extra fields beyond `server`/`tool` are auto-collected as arguments.
+    ///
+    /// NOTE: schema overridden to a typed object — see below.
     #[serde(default)]
     #[schemars(with = "std::collections::HashMap<String, serde_json::Value>")]
-    arguments: serde_json::Value,
+    arguments: Option<serde_json::Value>,
 }
 
 // ── Tools ──────────────────────────────────────────────────────────
@@ -195,30 +196,50 @@ impl LoaderServer {
     }
 
     #[tool(
-        description = "Call a tool on a loaded MCP server. `server` = name used in mcp_load, `tool` = tool name, `arguments` = JSON object of args. Returns the tool's text output."
+        description = "Call a tool on a loaded MCP server. `server` = name used in mcp_load, `tool` = tool name, `arguments` = JSON object of args for the sub-tool (NOT a string — pass an actual JSON object). Returns the tool's text output."
     )]
     async fn mcp_call(
         &self,
         Parameters(p): Parameters<CallParams>,
     ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
         let servers = self.servers.lock().await;
-        let loaded = match servers.get(&p.server) {
+        let server_name = match p.server {
+            Some(s) => s,
+            None => return Ok(tool_error("missing 'server' parameter")),
+        };
+        let tool_name = match p.tool {
+            Some(t) => t,
+            None => return Ok(tool_error("missing 'tool' parameter")),
+        };
+        let loaded = match servers.get(&server_name) {
             Some(l) => l,
             None => {
                 return Ok(tool_error(format!(
                     "server '{}' not loaded (use mcp_load first)",
-                    p.server
+                    server_name
                 )))
             }
         };
 
+        // Handle arguments: accept object, null/None as empty, or string-as-JSON.
         let arguments = match p.arguments {
-            serde_json::Value::Object(m) => Some(m),
-            serde_json::Value::Null => None,
-            other => {
+            Some(serde_json::Value::Object(m)) => Some(m),
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(s)) => {
+                // LLM sometimes sends args as a JSON string — parse it.
+                match serde_json::from_str::<serde_json::Value>(&s) {
+                    Ok(serde_json::Value::Object(m)) => Some(m),
+                    Ok(other) => return Ok(tool_error(format!(
+                        "arguments string parsed to non-object: {}", other
+                    ))),
+                    Err(e) => return Ok(tool_error(format!(
+                        "arguments is a string that failed JSON parse: {} — raw: {:.200}", e, s
+                    ))),
+                }
+            }
+            Some(other) => {
                 return Ok(tool_error(format!(
-                    "arguments must be a JSON object, got: {}",
-                    other
+                    "arguments must be a JSON object or null, got: {}", other
                 )))
             }
         };
@@ -226,7 +247,7 @@ impl LoaderServer {
         let result = match tokio::time::timeout(
             std::time::Duration::from_secs(120),
             loaded.peer.call_tool(CallToolRequestParams {
-                name: p.tool.clone().into(),
+                name: tool_name.clone().into(),
                 arguments,
                 meta: None,
                 task: None,
