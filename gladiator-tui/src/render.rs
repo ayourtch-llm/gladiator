@@ -276,7 +276,7 @@ impl Renderer {
                 && {
                     let first_line = msg.content.split('\n').next().unwrap_or("");
                     matches!(
-                        first_line,
+                        first_line.trim(),
                         "edit_file" | "apply_edits" | "plan_edits"
                     )
                 };
@@ -332,8 +332,8 @@ impl Renderer {
             }
 
             // Collapse long tool results: first N lines + ellipsis hint.
-            // bash gets a larger budget (10), other tools get 3.
-            let is_bash = msg.content.starts_with("[bash]");
+            // Command tools (bash/run_command) get a larger budget, others 3.
+            let is_bash = msg.content.starts_with("$ ");
             let max_lines = if is_bash { 10 } else { 3 };
 
             let all_lines: Vec<&str> = msg.content.split('\n').collect();

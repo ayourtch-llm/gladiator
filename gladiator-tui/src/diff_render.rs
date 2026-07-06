@@ -70,6 +70,20 @@ pub fn render_apply_edits_diff(args: &serde_json::Value) -> Option<String> {
     Some(out.join("\n"))
 }
 
+/// Render a command-execution tool-call's arguments as a shell-prompt line.
+/// Returns `None` for non-command tools or empty commands.
+pub fn render_tool_call(name: &str, args: &serde_json::Value) -> Option<String> {
+    let cmd = match name {
+        "bash" | "run_command" => args.get("command").and_then(|v| v.as_str()),
+        _ => None,
+    }?;
+    if !cmd.is_empty() {
+        Some(format!("$ {}", cmd))
+    } else {
+        None
+    }
+}
+
 /// Top-level entry point: given the tool name and its parsed JSON arguments,
 /// produce a diff string when applicable. Returns `None` for non-diff tools
 /// or when there's nothing to show.
@@ -168,5 +182,35 @@ mod tests {
     fn unknown_tool_returns_none() {
         let args = serde_json::json!({"file_path": "/x"});
         assert_eq!(render_tool_diff("bash", &args), None);
+    }
+
+    #[test]
+    fn render_bash_command_basic() {
+        let args = serde_json::json!({"command": "ls -la"});
+        assert_eq!(
+            render_tool_call("bash", &args),
+            Some("$ ls -la".to_string())
+        );
+    }
+
+    #[test]
+    fn render_run_command_basic() {
+        let args = serde_json::json!({"command": "echo hi"});
+        assert_eq!(
+            render_tool_call("run_command", &args),
+            Some("$ echo hi".to_string())
+        );
+    }
+
+    #[test]
+    fn render_non_command_tool_returns_none() {
+        let args = serde_json::json!({"file_path": "/x"});
+        assert!(render_tool_call("edit_file", &args).is_none());
+    }
+
+    #[test]
+    fn render_empty_command_returns_none() {
+        let args = serde_json::json!({"command": ""});
+        assert!(render_tool_call("bash", &args).is_none());
     }
 }

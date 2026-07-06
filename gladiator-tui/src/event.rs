@@ -44,7 +44,9 @@ pub fn bus_to_app_message(msg: &Message) -> Option<AppMessage> {
                 let content = if !name.is_empty() && !args.is_empty() {
                     if let Some(ref p) = parsed_args {
                         if let Some(diff) = crate::diff_render::render_tool_diff(name, p) {
-                            format!("{} \n{}", name, diff)
+                            format!("{}\n{}", name, diff)
+                        } else if let Some(cmd_line) = crate::diff_render::render_tool_call(name, p) {
+                            cmd_line
                         } else {
                             format!("{}({})", name, args)
                         }
