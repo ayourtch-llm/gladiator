@@ -12,6 +12,8 @@ use and an HTTP debug server for introspection.
 > OpenAI Chat Completions streaming protocol and works against any compatible
 > endpoint.
 
+![gladiator running under tttt](docs/gladiator-tui-screenshot.png)
+
 ## Features
 
 - **Agentic loop** — multi-turn tool-calling with parallel tool dispatch,
