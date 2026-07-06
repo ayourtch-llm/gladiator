@@ -82,6 +82,15 @@ pub struct ConversationState {
     /// Reset on clear_for_restart (fresh subagent context gets a fresh nudge).
     #[serde(skip)]
     pub context_nudge_fired: bool,
+
+    /// Tool calls from the current batch that haven't been dispatched yet
+    /// (sent to a tool actor or handled internally). Populated by
+    /// `add_tool_calls`; drained one-by-one by the agent's dispatch loop.
+    /// Used to serialize subagent calls: when the batch contains
+    /// `call_subagent`, tools after it are deferred until the subagent
+    /// completes. IDs are NOT added to `pending_tool_calls` until dispatch.
+    #[serde(skip)]
+    pub undispatched_tool_calls: Vec<serde_json::Value>,
 }
 
 /// A one-shot context-usage reminder. When `last_usage.input_tokens` exceeds
@@ -226,6 +235,11 @@ impl ConversationState {
             };
             self.tool_call_order.push(id);
         }
+        // Stash tool calls for sequential dispatch. IDs are NOT added to
+        // pending_tool_calls here — that happens one-by-one as the dispatch
+        // loop sends each tool call. This lets the dispatch loop serialize
+        // call_subagent: tools after it wait until the subagent completes.
+        self.undispatched_tool_calls = tool_calls.clone();
         let mut msg = serde_json::json!({
             "role": "assistant",
             "tool_calls": tool_calls
@@ -239,8 +253,23 @@ impl ConversationState {
             msg["reasoning"] = serde_json::Value::String(r);
         }
         self.messages.push(msg);
-        for id in &self.tool_call_order {
-            self.pending_tool_calls.insert(id.clone());
+    }
+
+    /// Mark a tool call as dispatched (add its ID to pending_tool_calls).
+    /// Called by the dispatch loop right before sending each tool call to
+    /// a tool actor or handling it internally.
+    pub fn mark_dispatched(&mut self, tool_call_id: &str) {
+        self.pending_tool_calls.insert(tool_call_id.to_string());
+    }
+
+    /// Mark all undispatched tool calls as dispatched: drain
+    /// `undispatched_tool_calls` and insert each ID into `pending_tool_calls`.
+    /// The dispatch loop calls this per-tool; tests can call it to simulate
+    /// "all tools in flight" without running the full dispatch loop.
+    pub fn mark_all_dispatched(&mut self) {
+        for tc in self.undispatched_tool_calls.drain(..) {
+            let id = tc["id"].as_str().unwrap_or("").to_string();
+            self.pending_tool_calls.insert(id);
         }
     }
 
@@ -438,14 +467,19 @@ impl ConversationState {
         self.pending_tool_calls.remove(tool_call_id);
         // When all tool calls in the current batch are resolved, reorder
         // the tool result messages to match the original tool_calls array
-        // order from the LLM.
-        if self.pending_tool_calls.is_empty() && !self.tool_call_order.is_empty() {
+        // order from the LLM. Wait for undispatched calls too — otherwise
+        // we'd reorder prematurely when serialized subagent calls defer
+        // later tools in the batch.
+        if self.pending_tool_calls.is_empty()
+            && self.undispatched_tool_calls.is_empty()
+            && !self.tool_call_order.is_empty()
+        {
             self.reorder_tool_results();
         }
     }
 
     pub fn all_tool_calls_resolved(&self) -> bool {
-        self.pending_tool_calls.is_empty()
+        self.pending_tool_calls.is_empty() && self.undispatched_tool_calls.is_empty()
     }
 
     /// Reorder the last N tool result messages to match the original
@@ -681,7 +715,9 @@ impl ConversationState {
             .unwrap_or(0);
 
         // Per fixme: inject only if loop is idle; cancel otherwise.
-        let is_idle = !self.inference_in_flight && self.pending_tool_calls.is_empty();
+        let is_idle = !self.inference_in_flight
+            && self.pending_tool_calls.is_empty()
+            && self.undispatched_tool_calls.is_empty();
         if !is_idle {
             // For one-shot wake-ups that can't fire because we're busy:
             // reschedule them to the next tick (defer). For cron: also defer.
@@ -797,6 +833,7 @@ impl ConversationState {
         self.context_reminders.clear();
         self.wake_ups.clear();
         self.context_nudge_fired = false;
+        self.undispatched_tool_calls.clear();
         // Note: surprises are NOT cleared here — they're drained via
         // take_surprises() in handle_restart_from_file before clear_for_restart,
         // so the agent can write tmp/surprises.md and spawn five-whys analysis.

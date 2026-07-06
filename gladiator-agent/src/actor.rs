@@ -348,10 +348,27 @@ impl AgentActor {
         state: &Arc<Mutex<ConversationState>>,
         subagent_stack: &Arc<Mutex<Vec<SubagentFrame>>>,
     ) {
-        let mut s = state.lock().await;
-        if !s.all_tool_calls_resolved() {
-            return;
+        // Check dispatch state under a single short-lived lock, then drop it
+        // before taking any further action (dispatch or turn advancement).
+        {
+            let s = state.lock().await;
+            // If there are undispatched tool calls, dispatch the next batch
+            // instead of advancing the turn. This resumes deferred tools after
+            // a call_subagent completes, and after in-flight tools that were
+            // gating a subagent resolve.
+            if !s.undispatched_tool_calls.is_empty() {
+                drop(s);
+                self.dispatch_undispatched_tool_calls(bus, state, subagent_stack)
+                    .await;
+                return;
+            }
+            // Tools still in flight — wait for their results.
+            if !s.pending_tool_calls.is_empty() {
+                return;
+            }
         }
+
+        let mut s = state.lock().await;
         let pending = s.drain_pending_messages();
         if !pending.is_empty() {
             s.reset_iteration();
@@ -874,6 +891,197 @@ impl AgentActor {
         self.advance_turn_if_resolved(bus, state, subagent_stack).await;
     }
 
+    /// Dispatch pending (undispatched) tool calls from the current batch in
+    /// order. Non-subagent tools are dispatched eagerly (they run in parallel
+    /// on the bus). `call_subagent` is serialized: if there are in-flight tool
+    /// calls, dispatch halts and waits for them to resolve before launching
+    /// the subagent — this prevents a late tool result from corrupting the
+    /// subagent's freshly-cleared ConversationState. After dispatching a
+    /// `call_subagent`, remaining tools are deferred until the subagent pops.
+    async fn dispatch_undispatched_tool_calls(
+        &self,
+        bus: &Bus,
+        state: &Arc<Mutex<ConversationState>>,
+        subagent_stack: &Arc<Mutex<Vec<SubagentFrame>>>,
+    ) {
+        loop {
+            // Peek at the next undispatched tool call.
+            let next_tc = {
+                let s = state.lock().await;
+                if s.undispatched_tool_calls.is_empty() {
+                    return; // nothing left to dispatch
+                }
+                s.undispatched_tool_calls[0].clone()
+            };
+
+            let func_name = next_tc["function"]["name"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+
+            // Serialize subagent calls: wait for all in-flight tools before
+            // launching a subagent. The subagent clears the shared
+            // ConversationState, so a late tool result would corrupt it.
+            if func_name == "call_subagent" {
+                let in_flight = {
+                    let s = state.lock().await;
+                    !s.pending_tool_calls.is_empty()
+                };
+                if in_flight {
+                    // Stop here. When the in-flight tools resolve,
+                    // advance_turn_if_resolved will re-call this method.
+                    debug!(
+                        "Agent {}: deferring call_subagent — {} tool call(s) still in flight",
+                        self.index,
+                        state.lock().await.pending_tool_calls.len()
+                    );
+                    return;
+                }
+                // Safe to launch — no in-flight tools.
+            }
+
+            // Remove from undispatched list and mark as dispatched.
+            {
+                let mut s = state.lock().await;
+                s.undispatched_tool_calls.remove(0);
+                let id = next_tc["id"].as_str().unwrap_or("").to_string();
+                s.mark_dispatched(&id);
+            }
+
+            self.dispatch_one_tool_call(bus, state, subagent_stack, &next_tc)
+                .await;
+
+            // After launching a subagent, stop dispatching — the remaining
+            // tools must wait until the subagent completes (pops). When
+            // pop_subagent → advance_turn_if_resolved → this method, they'll
+            // be dispatched.
+            if func_name == "call_subagent" {
+                return;
+            }
+            // Non-subagent: loop to dispatch the next tool eagerly.
+        }
+    }
+
+    /// Dispatch a single tool call. Extracted from the tool_calls_rx handler
+    /// so it can be called by `dispatch_undispatched_tool_calls`. Handles both
+    /// internal tools (inline) and external tools (published on the bus).
+    /// The tool call ID is already marked as dispatched before this is called.
+    async fn dispatch_one_tool_call(
+        &self,
+        bus: &Bus,
+        state: &Arc<Mutex<ConversationState>>,
+        subagent_stack: &Arc<Mutex<Vec<SubagentFrame>>>,
+        tc: &serde_json::Value,
+    ) {
+        let tool_call_id = tc["id"].as_str().unwrap_or("").to_string();
+        let func_name = tc["function"]["name"].as_str().unwrap_or("").to_string();
+        let func_args_str = match tc["function"]["arguments"].as_str() {
+            Some(s) => s.to_string(),
+            None => tc["function"]["arguments"].to_string(),
+        };
+        debug!("[agent] func_name={}, func_args_str={}", func_name, func_args_str);
+
+        let args: serde_json::Value = match serde_json::from_str(&func_args_str) {
+            Ok(a) => a,
+            Err(e) => {
+                error!("Failed to parse tool args for {}: {}", func_name, e);
+                let mut s = state.lock().await;
+                s.add_tool_result(
+                    &tool_call_id,
+                    &func_name,
+                    format!("Error parsing arguments: {}", e),
+                    false,
+                );
+                s.resolve_tool_call(&tool_call_id);
+                drop(s);
+                Box::pin(self.advance_turn_if_resolved(bus, state, subagent_stack)).await;
+                return;
+            }
+        };
+
+        // Agent-internal tools (todo_write/todo_read/restart_from_file/
+        // call_subagent) are handled inline against ConversationState.
+        if crate::internal_tools::is_internal_tool(&func_name) {
+            info!("Agent {} handling internal tool: {}", self.index, func_name);
+            let tool_status = Message::new(
+                &self.stream_output_topic,
+                &self.id(),
+                serde_json::json!({
+                    "id": tool_call_id,
+                    "name": func_name,
+                    "text": format!("Calling tool: {}({})", func_name, func_args_str),
+                }),
+            ).with_type("Info");
+            let depth = state.lock().await.subagent_depth;
+            let tool_status = self.stamp_depth_sync(tool_status, depth);
+            let _ = bus.publish(&self.id(), tool_status).await;
+
+            let outcome =
+                self.handle_internal_tool(&func_name, &args, &state, subagent_stack, bus)
+                    .await;
+            let success = outcome.success;
+            let display_snapshot = outcome.result_text.clone();
+
+            {
+                let mut s = state.lock().await;
+                if outcome.context_reset {
+                    s.resolve_tool_call(&tool_call_id);
+                } else {
+                    s.add_tool_result(
+                        &tool_call_id,
+                        &func_name,
+                        outcome.result_text,
+                        success,
+                    );
+                    s.resolve_tool_call(&tool_call_id);
+                }
+            }
+            let stream_msg = Message::new(
+                &self.stream_output_topic,
+                &self.id(),
+                format!(
+                    "  [tool_{}] {}({}) => {}",
+                    if success { "result" } else { "error" },
+                    func_name,
+                    tool_call_id,
+                    display_snapshot,
+                ),
+            ).with_type("LlmToolResult");
+            let depth = state.lock().await.subagent_depth;
+            let stream_msg = self.stamp_depth_sync(stream_msg, depth);
+            let _ = bus.publish(&self.id(), stream_msg).await;
+
+            Box::pin(self.advance_turn_if_resolved(bus, state, subagent_stack)).await;
+            return;
+        }
+
+        info!("Agent {} dispatching tool call: {}({})", self.index, func_name, func_args_str);
+        let tool_status = Message::new(
+            &self.stream_output_topic,
+            &self.id(),
+            serde_json::json!({
+                "id": tool_call_id,
+                "name": func_name,
+                "text": format!("Calling tool: {}({})", func_name, func_args_str),
+            }),
+        ).with_type("Info");
+        let depth = state.lock().await.subagent_depth;
+        let tool_status = self.stamp_depth_sync(tool_status, depth);
+        let _ = bus.publish(&self.id(), tool_status).await;
+
+        let exec_payload = serde_json::json!({
+            "tool_call_id": tool_call_id,
+            "tool_name": func_name,
+            "arguments": args,
+        });
+        let exec_msg = Message::new(
+            &format!("tool:{}:execute", func_name),
+            &self.id(),
+            exec_payload,
+        );
+        let _ = bus.publish(&self.id(), exec_msg).await;
+    }
+
     async fn send_conversation(
         &self,
         bus: &Bus,
@@ -1361,132 +1569,12 @@ impl Actor for AgentActor {
                             // Cross-turn loop detection (tie-breaker injection)
                             let _ = self.maybe_break_cross_turn_loop(bus, &state).await;
 
-                            for (i, tc) in tool_calls.iter().enumerate() {
-                                debug!("[agent] tool_call[{}]: {:?}", i, tc);
-                                let tool_call_id = {
-                                    let raw = tc["id"].as_str().unwrap_or("");
-                                    if raw.is_empty() {
-                                        format!("__idx_{}", i)
-                                    } else {
-                                        raw.to_string()
-                                    }
-                                };
-                                let func_name = tc["function"]["name"].as_str().unwrap_or("").to_string();
-                                let func_args_str = match tc["function"]["arguments"].as_str() {
-                                    Some(s) => s.to_string(),
-                                    None => tc["function"]["arguments"].to_string(),
-                                };
-                                debug!("[agent] func_name={}, func_args_str={}", func_name, func_args_str);
-
-                                let args: serde_json::Value = match serde_json::from_str(&func_args_str) {
-                                    Ok(a) => a,
-                                    Err(e) => {
-                                        error!("Failed to parse tool args for {}: {}", func_name, e);
-                                        let mut s = state.lock().await;
-                                        s.add_tool_result(&tool_call_id, &func_name, format!("Error parsing arguments: {}", e), false);
-                                        s.resolve_tool_call(&tool_call_id);
-                                        continue;
-                                    }
-                                };
-
-                                // Agent-internal tools (todo_write/todo_read/
-                                // restart_from_file) are handled inline against
-                                // ConversationState — they never go to a
-                                // ToolActorRunner, so no execute message is
-                                // published on the bus.
-                                if crate::internal_tools::is_internal_tool(&func_name) {
-                                    info!("Agent {} handling internal tool: {}", self.index, func_name);
-                                    // Publish structured JSON so the TUI can match
-                                    // this dispatch back to the streamed [tool]
-                                    // placeholder by id.
-                                    let tool_status = Message::new(
-                                        &self.stream_output_topic,
-                                        &self.id(),
-                                        serde_json::json!({
-                                            "id": tool_call_id,
-                                            "name": func_name,
-                                            "text": format!("Calling tool: {}({})", func_name, func_args_str),
-                                        }),
-                                    ).with_type("Info");
-                                    let depth = state.lock().await.subagent_depth;
-                                    let tool_status = self.stamp_depth_sync(tool_status, depth);
-                                    let _ = bus.publish(&self.id(), tool_status).await;
-
-                                    let outcome =
-                                        self.handle_internal_tool(&func_name, &args, &state, &subagent_stack, bus).await;
-                                    let success = outcome.success;
-                                    let display_snapshot = outcome.result_text.clone();
-
-                                    {
-                                        let mut s = state.lock().await;
-                                        if outcome.context_reset {
-                                            // restart_from_file rebuilt the whole transcript:
-                                            // appending a tool result here would answer a
-                                            // tool_calls message that no longer exists, so
-                                            // only resolve (no-op on the cleared pending set)
-                                            // and let advance_turn_if_resolved send the fresh
-                                            // conversation to the LLM.
-                                            s.resolve_tool_call(&tool_call_id);
-                                        } else {
-                                            s.add_tool_result(
-                                                &tool_call_id,
-                                                &func_name,
-                                                outcome.result_text,
-                                                success,
-                                            );
-                                            s.resolve_tool_call(&tool_call_id);
-                                        }
-                                    }
-                                    let stream_msg = Message::new(
-                                        &self.stream_output_topic,
-                                        &self.id(),
-                                        format!("  [tool_{}] {}({}) => {}",
-                                            if success { "result" } else { "error" },
-                                            func_name,
-                                            tool_call_id,
-                                            display_snapshot,
-                                        ),
-                                    ).with_type("LlmToolResult");
-                                    let depth = state.lock().await.subagent_depth;
-                                    let stream_msg = self.stamp_depth_sync(stream_msg, depth);
-                                    let _ = bus.publish(&self.id(), stream_msg).await;
-
-                                    self.advance_turn_if_resolved(bus, &state, &subagent_stack).await;
-                                    continue;
-                                }
-
-                                info!("Agent {} dispatching tool call: {}({})", self.index, func_name, func_args_str);
-
-                                // Publish tool call status to TUI
-                                // Publish structured JSON so the TUI can match
-                                // this dispatch back to the streamed [tool]
-                                // placeholder by id.
-                                let tool_status = Message::new(
-                                    &self.stream_output_topic,
-                                    &self.id(),
-                                    serde_json::json!({
-                                        "id": tool_call_id,
-                                        "name": func_name,
-                                        "text": format!("Calling tool: {}({})", func_name, func_args_str),
-                                    }),
-                                ).with_type("Info");
-                                let depth = state.lock().await.subagent_depth;
-                                let tool_status = self.stamp_depth_sync(tool_status, depth);
-                                let _ = bus.publish(&self.id(), tool_status).await;
-
-                                let exec_payload = serde_json::json!({
-                                    "tool_call_id": tool_call_id,
-                                    "tool_name": func_name,
-                                    "arguments": args,
-                                });
-
-                                let exec_msg = Message::new(
-                                    &format!("tool:{}:execute", func_name),
-                                    &self.id(),
-                                    exec_payload,
-                                );
-                                let _ = bus.publish(&self.id(), exec_msg).await;
-                            }
+                            // Dispatch tool calls sequentially. Non-subagent
+                            // tools run eagerly; call_subagent is deferred until
+                            // any in-flight tools complete, and tools after it
+                            // are deferred until the subagent pops.
+                            self.dispatch_undispatched_tool_calls(bus, &state, &subagent_stack)
+                                .await;
                         }
                         Err(RecvError::Lagged(n)) => warn!("Agent {} tool_calls lagged: {}", self.index, n),
                         Err(RecvError::Closed) => break,

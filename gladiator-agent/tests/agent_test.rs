@@ -124,7 +124,13 @@ fn conversation_state_add_tool_calls() {
     assert_eq!(state.messages.len(), 1);
     assert_eq!(state.messages[0]["role"], "assistant");
     assert!(state.messages[0]["tool_calls"].is_array());
+    // Tool calls start in undispatched_tool_calls, NOT pending_tool_calls.
+    assert_eq!(state.undispatched_tool_calls.len(), 1);
+    assert!(state.pending_tool_calls.is_empty());
+    // After marking all dispatched, IDs move to pending_tool_calls.
+    state.mark_all_dispatched();
     assert!(state.pending_tool_calls.contains(&"call-1".to_string()));
+    assert!(state.undispatched_tool_calls.is_empty());
 }
 
 #[test]
@@ -496,6 +502,7 @@ fn tool_results_reordered_to_match_tool_calls() {
         }),
     ];
     state.add_tool_calls(tool_calls);
+    state.mark_all_dispatched();
 
     // Results arrive in a different order: call-b, call-c, call-a
     state.add_tool_result("call-b", "tool_b", "result b", true);
@@ -546,6 +553,7 @@ fn tool_results_reordered_correct_count() {
         }),
     ];
     state.add_tool_calls(tool_calls);
+    state.mark_all_dispatched();
 
     // Results arrive in reverse order: call-c, call-b, call-a
     state.add_tool_result("call-c", "tool_c", "result c", true);
@@ -581,6 +589,7 @@ fn tool_results_single_call_no_reorder_needed() {
         "function": {"name": "bash", "arguments": "{}"}
     })];
     state.add_tool_calls(tool_calls);
+    state.mark_all_dispatched();
 
     state.add_tool_result("call-1", "bash", "output", true);
     state.resolve_tool_call("call-1");
@@ -600,6 +609,7 @@ fn tool_results_two_batches_reorder_independently() {
         serde_json::json!({"id": "call-b", "type": "function", "function": {"name": "tool_b", "arguments": "{}"}}),
     ];
     state.add_tool_calls(tool_calls_1);
+    state.mark_all_dispatched();
 
     // Results arrive in reverse order
     state.add_tool_result("call-b", "tool_b", "result b", true);
@@ -618,6 +628,7 @@ fn tool_results_two_batches_reorder_independently() {
         serde_json::json!({"id": "call-d", "type": "function", "function": {"name": "tool_d", "arguments": "{}"}}),
     ];
     state.add_tool_calls(tool_calls_2);
+    state.mark_all_dispatched();
 
     // Results arrive in reverse order again
     state.add_tool_result("call-d", "tool_d", "result d", true);
@@ -642,6 +653,57 @@ fn tool_call_order_not_serialized() {
     state.add_tool_calls(tool_calls);
     let json = serde_json::to_value(&state).unwrap();
     assert!(json.get("tool_call_order").is_none());
+}
+
+#[test]
+fn undispatched_tool_calls_not_serialized() {
+    let mut state = ConversationState::new();
+    let tool_calls = vec![serde_json::json!({
+        "id": "call-1",
+        "type": "function",
+        "function": {"name": "bash", "arguments": "{}"}
+    })];
+    state.add_tool_calls(tool_calls);
+    let json = serde_json::to_value(&state).unwrap();
+    assert!(json.get("undispatched_tool_calls").is_none());
+}
+
+#[test]
+fn undispatched_tool_calls_populated_by_add_tool_calls() {
+    let mut state = ConversationState::new();
+    let tool_calls = vec![
+        serde_json::json!({"id": "call-a", "type": "function", "function": {"name": "bash", "arguments": "{}"}}),
+        serde_json::json!({"id": "call-b", "type": "function", "function": {"name": "call_subagent", "arguments": "{\"task\":\"x\"}"}}),
+        serde_json::json!({"id": "call-c", "type": "function", "function": {"name": "bash", "arguments": "{}"}}),
+    ];
+    state.add_tool_calls(tool_calls);
+    assert_eq!(state.undispatched_tool_calls.len(), 3);
+    assert!(state.pending_tool_calls.is_empty());
+    // mark_dispatched moves one ID at a time
+    state.mark_dispatched("call-a");
+    assert!(state.pending_tool_calls.contains("call-a"));
+    assert_eq!(state.undispatched_tool_calls.len(), 3); // list not drained
+    // mark_all_dispatched drains the rest
+    state.mark_all_dispatched();
+    assert!(state.pending_tool_calls.contains("call-b"));
+    assert!(state.pending_tool_calls.contains("call-c"));
+    assert!(state.undispatched_tool_calls.is_empty());
+}
+
+#[test]
+fn all_tool_calls_resolved_requires_both_pending_and_undispatched_empty() {
+    let mut state = ConversationState::new();
+    state.add_tool_calls(vec![
+        serde_json::json!({"id": "c1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}),
+    ]);
+    // Undispatched tools present → not resolved.
+    assert!(!state.all_tool_calls_resolved());
+    state.mark_all_dispatched();
+    // Dispatched but pending → not resolved.
+    assert!(!state.all_tool_calls_resolved());
+    state.resolve_tool_call("c1");
+    // Both empty → resolved.
+    assert!(state.all_tool_calls_resolved());
 }
 
 // =========================================================================
