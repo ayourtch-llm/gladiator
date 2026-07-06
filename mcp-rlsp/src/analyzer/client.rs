@@ -25,6 +25,8 @@ pub struct RustAnalyzerClient {
     receiver: Option<tokio::sync::mpsc::UnboundedReceiver<Value>>, 
     open_files: HashSet<String>,
     linked_projects: Vec<String>,
+    /// The project root path this client was started with. None = CWD-based.
+    project_root: Option<String>,
 }
 
 impl Default for RustAnalyzerClient {
@@ -37,7 +39,6 @@ impl Drop for RustAnalyzerClient {
         let _ = self.sender.take();
     }
 }
-
 /// Read one LSP message (headers + body) from a buffered reader.
 async fn read_one_message<R: AsyncBufReadExt + Unpin>(reader: &mut R) -> Result<Value> {
     let mut content_length: Option<usize> = None;
@@ -59,10 +60,19 @@ async fn read_one_message<R: AsyncBufReadExt + Unpin>(reader: &mut R) -> Result<
 impl RustAnalyzerClient {
     pub fn new() -> Self {
         Self { request_id: 0, initialized: false, sender: None, receiver: None,
-               open_files: HashSet::new(), linked_projects: Vec::new() }
+               open_files: HashSet::new(), linked_projects: Vec::new(),
+               project_root: None }
     }
 
-    /// Lazy initialization — call start() if not yet initialized.
+    /// Returns the project root path this client is associated with.
+    pub fn project_root(&self) -> Option<&str> {
+        self.project_root.as_deref()
+    }
+
+    /// Whether RA has been initialized for this client.
+    pub fn is_initialized(&self) -> bool { self.initialized }
+
+    /// Lazy initialization — call start() if not yet initialized, using CWD as project root.
     pub async fn ensure_started(&mut self) -> Result<()> {
         if !self.initialized {
             dbg_log("ensure_started: not initialized, calling start()");
@@ -72,18 +82,35 @@ impl RustAnalyzerClient {
         Ok(())
     }
 
-    /// Spawn rust-analyzer and start the IO task.
+    /// Lazy initialization with an explicit project root path.
+    /// If the client is already initialized for a different project, returns error.
+    pub async fn ensure_started_with_project(&mut self, project_path: &str) -> Result<()> {
+        if !self.initialized {
+            dbg_log(&format!("ensure_started_with_project: starting RA for {project_path}"));
+            self.start_with_project(Some(project_path.to_string())).await?;
+            dbg_log("ensure_started_with_project: start completed");
+        }
+        Ok(())
+    }
+
+    /// Spawn rust-analyzer and start the IO task. Uses CWD as project root.
     pub async fn start(&mut self) -> Result<()> {
+        self.start_with_project(None).await
+    }
+
+    /// Spawn rust-analyzer with an explicit project path (or None for CWD).
+    /// The project_path is used to:
+    /// 1. Generate rust-project.json from that directory's cargo metadata
+    /// 2. Set the RA process current_dir (when not using linkedProjects)
+    pub async fn start_with_project(&mut self, project_path: Option<String>) -> Result<()> {
         let path = get_rust_analyzer_path();
 
-        // If CWD has a [workspace] Cargo.toml (with or without [package]),
-        // RA's project model gets confused by the dual manifest and returns null
-        // for all queries. Fix: generate rust-project.json from cargo metadata,
-        // pass it via linkedProjects, spawn RA in /tmp with rootUri=null so
-        // auto-discovery finds no Cargo.toml.
-        // When using rust-project.json, RA doesn't run cargo metadata at all — it
-        // loads projects directly from the JSON, bypassing the dual-manifest issue.
-        let current_dir = std::env::current_dir()?;
+        // Determine the effective working directory for this client.
+        let current_dir = match &project_path {
+            Some(p) => std::path::PathBuf::from(p),
+            None => std::env::current_dir()?,
+        };
+        self.project_root = project_path;
         dbg_log(&format!("start: CWD={}", current_dir.display()));
         let workspace_toml_path = current_dir.join("Cargo.toml");
         // Detect any Cargo.toml with [workspace] — even if it also has [package],

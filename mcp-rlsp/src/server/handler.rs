@@ -9,35 +9,49 @@ use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::analyzer::RustAnalyzerClient;
+use crate::analyzer::ProjectManager;
 use crate::tools::{execute_tool, get_tools, ToolResult};
 
 #[derive(Clone)]
 pub struct RustMcpServer {
-    analyzer: Arc<Mutex<RustAnalyzerClient>>,
+    manager: Arc<Mutex<ProjectManager>>,
 }
 
 impl Default for RustMcpServer {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
+}
+
+fn dbg_log(msg: &str) {
+    eprintln!("[mcp-rlsp debug] {msg}");
 }
 
 impl RustMcpServer {
     pub fn new() -> Self {
+        // Auto-register the CWD project on startup so existing single-project
+        // usage continues to work without explicit add_project calls.
+        let mut manager = ProjectManager::new();
+        if let Ok(cwd) = std::env::current_dir() {
+            let cwd_str = cwd.display().to_string();
+            dbg_log(&format!("RustMcpServer::new: auto-registering CWD project {cwd_str}"));
+            // add_project canonicalizes the path, so pass the directory.
+            if !manager.add_project(&cwd_str).is_ok() {
+                eprintln!("[mcp-rlsp debug] failed to auto-register CWD");
+            }
+        }
         Self {
-            analyzer: Arc::new(Mutex::new(RustAnalyzerClient::new())),
+            manager: Arc::new(Mutex::new(manager)),
         }
     }
 
     pub async fn start(&mut self) -> Result<()> {
-        let mut analyzer = self.analyzer.lock().await;
-        analyzer.start().await
+        // RA starts lazily on first tool call via get_active_client_mut.
+        // No eager startup — indexing takes 200+ seconds and would block the MCP handshake.
+        Ok(())
     }
 
     pub async fn call_tool(&mut self, name: &str, args: Value) -> Result<ToolResult> {
-        let mut analyzer = self.analyzer.lock().await;
-        execute_tool(name, args, &mut analyzer).await
+        let mut manager = self.manager.lock().await;
+        execute_tool(name, args, &mut manager).await
     }
 }
 
@@ -87,11 +101,11 @@ impl ServerHandler for RustMcpServer {
     ) -> impl std::future::Future<Output = Result<CallToolResult, rmcp::ErrorData>> + Send {
         let name = request.name.as_ref().to_string();
         let args = request.arguments.unwrap_or_default();
-        let analyzer = self.analyzer.clone();
+        let manager = self.manager.clone();
 
         async move {
-            let mut client = analyzer.lock().await;
-            match execute_tool(&name, Value::Object(args), &mut client).await {
+            let mut mgr = manager.lock().await;
+            match execute_tool(&name, Value::Object(args), &mut mgr).await {
                 Ok(result) => {
                     let content: Vec<Content> = result
                         .content
@@ -99,7 +113,7 @@ impl ServerHandler for RustMcpServer {
                         .filter_map(|m| {
                             m.get("text")
                                 .and_then(|t| t.as_str())
-                                .map(|t| Content::text(t))
+                                .map(Content::text)
                         })
                         .collect();
 
@@ -112,7 +126,7 @@ impl ServerHandler for RustMcpServer {
                 }
                 Err(e) => Ok(CallToolResult {
                     content: vec![Content::text(format!("Error: {e}"))],
-                    is_error: Some(false),
+                    is_error: Some(true),
                     meta: None,
                     structured_content: None,
                 }),
