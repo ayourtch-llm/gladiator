@@ -413,6 +413,38 @@ impl AgentActor {
                     Err(e) => e,
                 }
             }
+            "schedule_wake_up" => {
+                let delay = args.get("delay_seconds")
+                    .and_then(|v| v.as_u64());
+                let message = match args.get("message").and_then(|m| m.as_str()) {
+                    Some(s) => s.to_string(),
+                    None => return InternalToolOutcome::err("Missing 'message'"),
+                };
+                match delay {
+                    Some(secs) => {
+                        let interval = args.get("interval_seconds")
+                            .and_then(|v| v.as_u64());
+                        let mut s = state.lock().await;
+                        if let Some(interval_secs) = interval {
+                            s.add_cron_wake_up(secs, interval_secs, message);
+                            debug!("Agent {}: scheduled cron wake-up in {}s (every {}s)",
+                                self.index, secs, interval_secs);
+                            InternalToolOutcome::ok(format!(
+                                "Cron wake-up scheduled: fires in {}s, repeats every {}s.",
+                                secs, interval_secs
+                            ))
+                        } else {
+                            s.add_one_shot_wake_up(secs, message);
+                            debug!("Agent {}: scheduled one-shot wake-up in {}s", self.index, secs);
+                            InternalToolOutcome::ok(format!(
+                                "One-shot wake-up scheduled: fires in {} seconds.",
+                                secs
+                            ))
+                        }
+                    }
+                    None => InternalToolOutcome::err("Missing 'delay_seconds'"),
+                }
+            }
             _ => InternalToolOutcome::err(format!("Unknown internal tool: {}", name)),
         }
     }
@@ -619,6 +651,8 @@ impl Actor for AgentActor {
             };
 
         let mut tool_watchdog = tokio::time::interval(std::time::Duration::from_secs(10));
+        // Wake-up check interval: every 5 seconds, scan for due wake-ups.
+        let mut wake_up_timer = tokio::time::interval(std::time::Duration::from_secs(5));
 
         info!(
             "Agent actor {} listening on '{}' with {} tools, max_iterations={}",
@@ -1126,7 +1160,31 @@ impl Actor for AgentActor {
                             }
                         }
                         Err(RecvError::Lagged(_)) => {}
-                        Err(RecvError::Closed) => {}
+                        Err(RecvError::Closed) => break,
+                    }
+                }
+                _ = wake_up_timer.tick() => {
+                    // Check for due scheduled wake-ups. Messages are injected
+                    // into pending_messages only when the loop is idle; busy
+                    // loops defer one-shot and reschedule cron.
+                    let fired: Vec<String> = {
+                        let mut s = state.lock().await;
+                        s.check_wake_ups()
+                    };
+                    if !fired.is_empty() {
+                        for msg in &fired {
+                            info!("Agent {}: wake-up fired: {}", self.index, msg);
+                            // Publish to stream so the TUI shows it.
+                            let display_msg = Message::new(
+                                &self.stream_output_topic,
+                                &self.id(),
+                                format!("[wake-up] {}", msg),
+                            ).with_type("Info");
+                            let _ = bus.publish(&self.id(), display_msg).await;
+                        }
+                        // If wake-ups injected pending messages and the loop is
+                        // idle, kick off a turn to process them.
+                        self.advance_turn_if_resolved(bus, &state).await;
                     }
                 }
             }

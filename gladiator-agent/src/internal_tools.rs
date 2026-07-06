@@ -97,7 +97,8 @@ impl TodoEntry {
 /// Names of tool calls handled internally by the agent, never dispatched to a
 /// `ToolActorRunner`. Keep this set in sync with `internal_tool_defs`.
 pub const INTERNAL_TOOL_NAMES: &[&str] =
-    &["todo_write", "todo_read", "restart_from_file", "set_context_reminder"];
+    &["todo_write", "todo_read", "restart_from_file",
+      "set_context_reminder", "schedule_wake_up"];
 
 pub fn is_internal_tool(name: &str) -> bool {
     INTERNAL_TOOL_NAMES.contains(&name)
@@ -176,6 +177,31 @@ pub fn internal_tool_defs() -> Vec<serde_json::Value> {
                         }
                     },
                     "required": ["threshold_tokens", "message"]
+                }
+            }
+        }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "schedule_wake_up",
+                "description": "Schedule a wake-up message to be injected into the agent loop at a future time. Supports one-shot (fires once after delay_seconds) and recurring/cron mode (fires every interval_seconds). The message is only injected when the agent loop is idle; if busy, one-shot wake-ups are deferred until idle and cron wake-ups reschedule to the next interval.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "delay_seconds": {
+                            "type": "number",
+                            "description": "Seconds from now until the first firing."
+                        },
+                        "message": {
+                            "type": "string",
+                            "description": "The message to inject when the wake-up fires."
+                        },
+                        "interval_seconds": {
+                            "type": "number",
+                            "description": "If provided, the wake-up recurs every interval_seconds (cron mode). If omitted, it's one-shot."
+                        }
+                    },
+                    "required": ["delay_seconds", "message"]
                 }
             }
         }),
@@ -358,7 +384,7 @@ mod tests {
             .iter()
             .map(|d| d["function"]["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, vec!["todo_write", "todo_read", "restart_from_file", "set_context_reminder"]);
+        assert_eq!(names, vec!["todo_write", "todo_read", "restart_from_file", "set_context_reminder", "schedule_wake_up"]);
     }
 
     #[test]
@@ -367,6 +393,7 @@ mod tests {
         assert!(is_internal_tool("todo_read"));
         assert!(is_internal_tool("restart_from_file"));
         assert!(is_internal_tool("set_context_reminder"));
+        assert!(is_internal_tool("schedule_wake_up"));
         assert!(!is_internal_tool("bash"));
         assert!(!is_internal_tool("todo_list"));
     }

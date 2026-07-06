@@ -798,3 +798,53 @@ fn context_reminder_injects_into_pending() {
     assert_eq!(state.pending_messages.len(), 1);
     assert_eq!(state.pending_messages[0], "Wake up!");
 }
+
+#[test]
+fn one_shot_wake_up_fires_when_idle() {
+    let mut state = ConversationState::new();
+    // Schedule a wake-up 0 seconds from now (immediate).
+    state.add_one_shot_wake_up(0, "Wake up!".into());
+    assert_eq!(state.wake_ups.len(), 1);
+    // When idle and due, it should fire.
+    let fired = state.check_wake_ups();
+    assert_eq!(fired.len(), 1);
+    assert_eq!(fired[0], "Wake up!");
+    // One-shot is removed after firing.
+    assert!(state.wake_ups.is_empty());
+}
+
+#[test]
+fn cron_wake_up_reschedules_after_firing() {
+    let mut state = ConversationState::new();
+    state.add_cron_wake_up(0, 60, "Tick".into());
+    assert_eq!(state.wake_ups.len(), 1);
+    // Fire it.
+    let fired = state.check_wake_ups();
+    assert_eq!(fired.len(), 1);
+    assert_eq!(fired[0], "Tick");
+    // Cron wake-up should still be in the list (rescheduled).
+    assert_eq!(state.wake_ups.len(), 1);
+}
+
+#[test]
+fn wake_up_deferred_when_not_idle() {
+    let mut state = ConversationState::new();
+    state.add_one_shot_wake_up(0, "Wake up!".into());
+    // Simulate busy loop.
+    state.inference_in_flight = true;
+    // Should not fire when busy — one-shot is deferred (rescheduled +1s).
+    let fired = state.check_wake_ups();
+    assert!(fired.is_empty());
+    assert_eq!(state.wake_ups.len(), 1); // still there, rescheduled
+}
+
+#[test]
+fn wake_up_injects_into_pending() {
+    let mut state = ConversationState::new();
+    state.add_one_shot_wake_up(0, "Do something".into());
+    let fired = state.check_wake_ups();
+    assert_eq!(fired.len(), 1);
+    // Should be in pending_messages.
+    assert_eq!(state.pending_messages.len(), 1);
+    assert_eq!(state.pending_messages[0], "Do something");
+}

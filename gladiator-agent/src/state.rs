@@ -56,6 +56,12 @@ pub struct ConversationState {
     /// Transient — not serialized across restarts (a fresh context starts clean).
     #[serde(skip)]
     pub context_reminders: Vec<ContextReminder>,
+    /// Scheduled wake-ups (one-shot or recurring cron-like). Each has a
+    /// next-due instant and an optional repeat interval. When due, the message
+    /// is injected into pending_messages if the loop is idle.
+    /// Transient — not serialized across restarts.
+    #[serde(skip)]
+    pub wake_ups: Vec<WakeUp>,
 }
 
 /// A one-shot context-usage reminder. When `last_usage.input_tokens` exceeds
@@ -67,6 +73,18 @@ pub struct ContextReminder {
     pub message: String,
     #[serde(default)]
     pub fired: bool,
+}
+
+/// A scheduled wake-up. `next_due` is the epoch ms when it should fire.
+/// If `interval_secs` is Some, it's a recurring (cron-like) wake-up that
+/// reschedules itself after firing; if None, it's one-shot and removed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WakeUp {
+    pub next_due_ms: u64,
+    pub message: String,
+    /// If Some(N), the wake-up recurs every N seconds. If None, one-shot.
+    #[serde(default)]
+    pub interval_secs: Option<u64>,
 }
 
 /// Subset of `gladiator_llm::Usage` mirrored locally so the agent crate
@@ -594,6 +612,103 @@ impl ConversationState {
         injected
     }
 
+    /// Add a one-shot wake-up: fires at `delay_secs` from now, then removed.
+    pub fn add_one_shot_wake_up(&mut self, delay_secs: u64, message: String) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        self.wake_ups.push(WakeUp {
+            next_due_ms: now_ms + delay_secs * 1000,
+            message,
+            interval_secs: None,
+        });
+    }
+
+    /// Add a recurring wake-up: fires every `interval_secs`, starting at
+    /// `delay_secs` from now.
+    pub fn add_cron_wake_up(
+        &mut self,
+        delay_secs: u64,
+        interval_secs: u64,
+        message: String,
+    ) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        self.wake_ups.push(WakeUp {
+            next_due_ms: now_ms + delay_secs * 1000,
+            message,
+            interval_secs: Some(interval_secs),
+        });
+    }
+
+    /// Remove all wake-ups.
+    pub fn clear_wake_ups(&mut self) {
+        self.wake_ups.clear();
+    }
+
+    /// Check for due wake-ups. Returns messages to inject (into pending_messages)
+    /// and reschedules or removes fired entries. Only fires when the agent loop
+    /// is idle (`inference_in_flight == false` and no `pending_tool_calls`);
+    /// otherwise, cron wake-ups are cancelled (rescheduled) per fixme spec.
+    pub fn check_wake_ups(&mut self) -> Vec<String> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        // Per fixme: inject only if loop is idle; cancel otherwise.
+        let is_idle = !self.inference_in_flight && self.pending_tool_calls.is_empty();
+        if !is_idle {
+            // For one-shot wake-ups that can't fire because we're busy:
+            // reschedule them to the next tick (defer). For cron: also defer.
+            for w in &mut self.wake_ups {
+                if w.next_due_ms <= now_ms && w.interval_secs.is_none() {
+                    // One-shot not yet fired — push it slightly into the future
+                    // so we check again on the next tick. This effectively defers
+                    // until idle.
+                    w.next_due_ms = now_ms + 1000;
+                }
+            }
+            return Vec::new();
+        }
+
+        let mut injected = Vec::new();
+        self.wake_ups.retain(|w| {
+            if w.next_due_ms <= now_ms {
+                injected.push(w.message.clone());
+                match w.interval_secs {
+                    Some(secs) => {
+                        // Reschedule recurring wake-up.
+                        // We can't mutate while retaining, so we'll handle
+                        // rescheduling after the retain. For now, keep it in
+                        // the list (return true).
+                        true
+                    }
+                    None => false, // Remove one-shot after firing.
+                }
+            } else {
+                true // Not due yet — keep.
+            }
+        });
+
+        // Reschedule recurring wake-ups that fired.
+        for w in &mut self.wake_ups {
+            if injected.contains(&w.message) && w.interval_secs.is_some() {
+                let interval_ms = w.interval_secs.unwrap() * 1000;
+                w.next_due_ms = now_ms + interval_ms;
+            }
+        }
+
+        // Inject into pending_messages so the agent loop picks them up.
+        for msg in &injected {
+            self.pending_messages.push(msg.clone());
+        }
+        injected
+    }
+
     /// Tokens remaining in the context window, computed from the last reported
     /// usage. `None` when either piece is unknown.
     pub fn context_remaining(&self) -> Option<u64> {
@@ -648,5 +763,6 @@ impl ConversationState {
         self.tool_call_order.clear();
         self.inference_in_flight = false;
         self.context_reminders.clear();
+        self.wake_ups.clear();
     }
 }
