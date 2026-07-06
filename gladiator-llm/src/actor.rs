@@ -432,8 +432,8 @@ impl LlmActor {
         config: &gladiator_core::LlmConfig,
         messages: &[serde_json::Value],
         schema: serde_json::Value,
-        bus: &gladiator_core::Bus,
-        tool_runtime: Arc<Mutex<ToolRuntime>>,
+        _bus: &gladiator_core::Bus,
+        _tool_runtime: Arc<Mutex<ToolRuntime>>,
     ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
         let generate_obj = GenerateObject::new(schema);
         let tool_def = generate_obj.tool_definition();

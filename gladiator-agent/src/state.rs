@@ -686,7 +686,7 @@ impl ConversationState {
             if w.next_due_ms <= now_ms {
                 injected.push(w.message.clone());
                 match w.interval_secs {
-                    Some(secs) => {
+                    Some(_secs) => {
                         // Reschedule recurring wake-up.
                         // We can't mutate while retaining, so we'll handle
                         // rescheduling after the retain. For now, keep it in
