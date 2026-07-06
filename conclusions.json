@@ -222,5 +222,9 @@
   {
     "id": "8868a4d6-d922-40e4-abb2-8c204faa998f",
     "text": "RA null-results root cause confirmed: rust-analyzer can't handle workspaces with \".\" as a member. Removing \".\" and copying to /tmp makes RA return symbols correctly. However, passing individual crate dirs (excluding \".\") as workspaceFolders doesn't fix it when the parent Cargo.toml still exists — RA walks up regardless. The three remaining mcp-rlsp LSP fixmes (organize_imports dec1dfd7, type_hierarchy a88584e0, extract/inline 74c02606) are all blocked on this same root cause. Next approach to try: generate rust-project.json in CWD before starting RA, OR set the `RA_NO_AUTO_LINK` env var if it exists.\""
+  },
+  {
+    "id": "b136900f-0de6-4403-a4bd-9196f36455b8",
+    "text": "Subagents implemented as internal tool `call_subagent` in gladiator-agent. Architecture: Vec<SubagentFrame> stack (saved ConversationState + system_message) created per-run(). Push clones current state, clears it, injects task text, sets active_system_message override and subagent_depth++. Inner conversation runs through same bus/LLM actor — completion detected when assistant output arrives with no pending tool calls at depth > 0. Pop restores parent state from frame, finds call_subagent's tool_call_id in restored messages, adds result + resolves. Max_iterations inside subagent triggers pop with partial result instead of handoff. build_messages_with_system now checks active_system_message override first. All workspace tests pass (64 agent tests including 10 new subagent unit tests)."
   }
 ]

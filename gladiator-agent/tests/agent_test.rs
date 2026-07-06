@@ -848,3 +848,149 @@ fn wake_up_injects_into_pending() {
     assert_eq!(state.pending_messages.len(), 1);
     assert_eq!(state.pending_messages[0], "Do something");
 }
+
+// =========================================================================
+// Subagent tests — push/pop mechanics, depth tracking, system message override
+// =========================================================================
+
+#[test]
+fn subagent_depth_defaults_zero() {
+    let state = ConversationState::new();
+    assert_eq!(state.subagent_depth, 0);
+    assert!(state.active_system_message.is_none());
+}
+
+#[test]
+fn subagent_active_system_message_overrides_build_messages() {
+    let mut state = ConversationState::new();
+    state.add_user_message("hello");
+    // Without override — uses passed-in system message
+    let msgs = state.build_messages_with_system("default prompt");
+    assert_eq!(msgs[0]["role"], "system");
+    assert_eq!(msgs[0]["content"], "default prompt");
+
+    // With override — active_system_message takes precedence
+    state.active_system_message = Some("subagent prompt".to_string());
+    let msgs2 = state.build_messages_with_system("should be ignored");
+    assert_eq!(msgs2[0]["role"], "system");
+    assert_eq!(msgs2[0]["content"], "subagent prompt");
+}
+
+#[test]
+fn subagent_clear_for_restart_preserves_depth() {
+    let mut state = ConversationState::new();
+    state.subagent_depth = 1;
+    state.active_system_message = Some("inner".to_string());
+    state.add_user_message("before clear");
+
+    // clear_for_restart should NOT touch depth/active_system_message
+    state.clear_for_restart();
+
+    assert_eq!(state.messages.len(), 0);
+    assert_eq!(state.subagent_depth, 1); // preserved!
+    assert_eq!(state.active_system_message, Some("inner".to_string()));
+}
+
+#[test]
+fn subagent_conversation_state_clone_includes_subagent_fields() {
+    let mut state = ConversationState::new();
+    state.add_user_message("parent msg");
+    state.subagent_depth = 2;
+    state.active_system_message = Some("sub prompt".into());
+
+    // Clone should preserve these (they're not serialized but ARE cloned)
+    let clone = state.clone();
+
+    assert_eq!(clone.messages.len(), 1);
+    assert_eq!(clone.subagent_depth, 2);
+    assert_eq!(clone.active_system_message.as_ref().unwrap(), "sub prompt");
+}
+
+#[test]
+fn subagent_frame_constructs() {
+    // Verify SubagentFrame is exported and constructable
+    let state = ConversationState::new();
+    let frame = gladiator_agent::SubagentFrame {
+        saved_state: state,
+        saved_system_message: "parent system".to_string(),
+    };
+    assert_eq!(frame.saved_system_message, "parent system");
+}
+
+#[test]
+fn subagent_call_subagent_is_internal_tool() {
+    // Verify call_subagent is registered as an internal tool
+    assert!(!gladiator_agent::is_internal_tool("not_a_real_tool"));
+    assert!(
+        gladiator_agent::is_internal_tool("call_subagent"),
+        "call_subagent should be recognized as an internal tool"
+    );
+}
+
+#[test]
+fn subagent_call_subagent_in_defs() {
+    let defs = gladiator_agent::internal_tools::internal_tool_defs();
+    let names: Vec<&str> = defs
+        .iter()
+        .map(|d| d["function"]["name"].as_str().unwrap())
+        .collect();
+
+    assert!(
+        names.contains(&"call_subagent"),
+        "call_subagent should appear in internal tool definitions"
+    );
+
+    // Verify the definition has required fields (task)
+    let def = defs
+        .iter()
+        .find(|d| d["function"]["name"] == "call_subagent")
+        .unwrap();
+    assert!(def["function"]["parameters"]["properties"]["task"].is_object());
+}
+
+#[test]
+fn subagent_depth_not_serialized() {
+    // Transient fields should not appear in serialized state
+    let mut state = ConversationState::new();
+    state.subagent_depth = 3;
+    state.active_system_message = Some("inner".into());
+
+    let json_str = serde_json::to_string(&state).unwrap();
+
+    assert!(
+        !json_str.contains("\"subagent_depth\""),
+        "depth should not be serialized"
+    );
+    assert!(
+        !json_str.contains("\"active_system_message\""),
+        "active_system_message should not be serialized"
+    );
+
+    // Deserialized state has defaults
+    let deserialized: ConversationState = serde_json::from_str(&json_str).unwrap();
+    assert_eq!(deserialized.subagent_depth, 0);
+}
+
+#[test]
+fn subagent_build_messages_with_empty_active_and_default() {
+    // When active_system_message is None and system_message is empty,
+    // no system message should be added
+    let mut state = ConversationState::new();
+    state.add_user_message("hi");
+
+    let msgs = state.build_messages_with_system("");
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0]["role"], "user");
+}
+
+#[test]
+fn subagent_build_messages_falls_back_when_active_none() {
+    // When active_system_message is None, fall back to passed-in system message
+    let mut state = ConversationState::new();
+    state.add_user_message("hi");
+
+    let msgs = state.build_messages_with_system("fallback prompt");
+    assert_eq!(msgs.len(), 2);
+    assert_eq!(msgs[0]["role"], "system");
+    assert_eq!(msgs[0]["content"], "fallback prompt");
+}

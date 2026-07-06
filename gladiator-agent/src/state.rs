@@ -3,7 +3,7 @@ use crate::internal_tools::{render_todos, TodoEntry};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ConversationState {
     pub messages: Vec<serde_json::Value>,
     pub iteration_count: u32,
@@ -68,6 +68,16 @@ pub struct ConversationState {
     /// then analyzed via five-whys llm_call per spec in tmp/five-whys.md.
     #[serde(skip)]
     pub surprises: Vec<Surprise>,
+    /// Subagent stack depth (0 = top-level agent). When > 0, the agent is
+    /// running inside a call_subagent invocation. Used for log indentation and
+    /// to detect inner-conversation completion so we can pop back.
+    #[serde(skip)]
+    pub subagent_depth: usize,
+    /// Active system message override used when running as a subagent (depth >
+    /// 0). When None, the agent's default system_message is used. Set by
+    /// call_subagent push; cleared on pop.
+    #[serde(skip)]
+    pub active_system_message: Option<String>,
 }
 
 /// A one-shot context-usage reminder. When `last_usage.input_tokens` exceeds
@@ -526,9 +536,10 @@ impl ConversationState {
     }
 
     pub fn build_messages_with_system(&self, system_message: &str) -> Vec<serde_json::Value> {
+        let active = self.active_system_message.as_ref().map(|s| s.as_str()).unwrap_or(system_message);
         let mut result = Vec::new();
-        if !system_message.is_empty() {
-            result.push(serde_json::json!({"role": "system", "content": system_message}));
+        if !active.is_empty() {
+            result.push(serde_json::json!({"role": "system", "content": active}));
         }
         for msg in &self.messages {
             let mut m = msg.clone();

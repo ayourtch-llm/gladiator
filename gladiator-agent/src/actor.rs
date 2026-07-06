@@ -4,8 +4,20 @@ use crate::state::ConversationState;
 use gladiator_core::{Actor, ActorAnnouncement, AgentConfig, Bus, Message};
 use gladiator_llm::LlmRequest;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 use tokio::sync::broadcast::error::RecvError;
 use tracing::{debug, error, info, warn};
+
+/// A saved snapshot of the parent agent's context when a subagent is spawned.
+/// Each push saves system_message + ConversationState so they can be restored
+/// on pop. The stack depth equals indentation level for log/stream messages.
+#[derive(Debug, Clone)]
+pub struct SubagentFrame {
+    /// The parent's conversation state at the time of the call_subagent push.
+    pub saved_state: ConversationState,
+    /// The parent agent's system message that was active before the push.
+    pub saved_system_message: String,
+}
 
 /// Resolve a path against the agent working directory. Absolute paths and
 /// `~`-prefixed paths are used as-is; relative paths are joined onto the
@@ -25,7 +37,7 @@ fn resolve_against_working_dir(path: &str, working_dir: &str) -> String {
     format!("{}/{}", wd, path)
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct AgentActor {
     pub index: usize,
     pub input_topic: String,
@@ -53,6 +65,31 @@ pub struct AgentActor {
     /// goes idle for >90s, the agent uses this to call llm_call for triage.
     /// None disables triage (idle timeout still breaks the stream).
     pub llm_config: Option<gladiator_core::LlmConfig>,
+}
+
+impl Default for AgentActor {
+    fn default() -> Self {
+        Self {
+            index: 0,
+            input_topic: String::new(),
+            llm_in_topic: String::new(),
+            llm_out_topic: String::new(),
+            llm_stream_topic: String::new(),
+            llm_tool_calls_topic: String::new(),
+            tool_results_topic: String::new(),
+            stream_output_topic: String::new(),
+            config: AgentConfig::default(),
+            max_iterations: 200,
+            system_message: String::new(),
+            tool_defs: Vec::new(),
+            tool_timeout_secs: 300,
+            state_control_topic: String::new(),
+            state_topic: String::new(),
+            llm_stats_topic: String::new(),
+            context_window: None,
+            llm_config: None,
+        }
+    }
 }
 
 impl AgentActor {
@@ -294,7 +331,8 @@ impl AgentActor {
     async fn advance_turn_if_resolved(
         &self,
         bus: &Bus,
-        state: &Arc<tokio::sync::Mutex<ConversationState>>,
+        state: &Arc<Mutex<ConversationState>>,
+        subagent_stack: &Arc<Mutex<Vec<SubagentFrame>>>,
     ) {
         let mut s = state.lock().await;
         if !s.all_tool_calls_resolved() {
@@ -322,6 +360,35 @@ impl AgentActor {
                 format!("hit {} iterations limit", self.max_iterations),
             ).with_trace(&summary));
             drop(s);
+
+            // If we're inside a subagent (depth > 0), pop back to parent
+            // instead of writing handoff — the inner agent's partial output is
+            // returned as call_subagent result.
+            let depth = {
+                let s = state.lock().await;
+                s.subagent_depth
+            };
+            if depth > 0 && !subagent_stack.lock().await.is_empty() {
+                let last_output = {
+                    let s = state.lock().await;
+                    s.messages.iter().rev()
+                        .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("assistant"))
+                        .and_then(|m| m.get("content").and_then(|c| c.as_str()).map(String::from))
+                        .unwrap_or_else(|| format!("Subagent hit max_iterations ({})", self.max_iterations))
+                };
+                warn!(
+                    "Agent {}: subagent hit max_iterations ({}), popping with partial result",
+                    self.index, self.max_iterations
+                );
+                let _ = bus.publish(&self.id(), Message::new(
+                    &self.stream_output_topic,
+                    &self.id(),
+                    format!("| [subagent] reached max iterations ({}) — returning partial", self.max_iterations),
+                ).with_type("Warning")).await;
+                Box::pin(self.pop_subagent(state, subagent_stack, bus, last_output)).await;
+                return;
+            }
+
             // Graceful recovery: persist a handoff file so the conversation
             // can be resumed via the restart_from_file internal tool.
             let handoff_path = "tmp/maxiter-handoff.txt";
@@ -365,7 +432,9 @@ impl AgentActor {
         &self,
         name: &str,
         args: &serde_json::Value,
-        state: &Arc<tokio::sync::Mutex<ConversationState>>,
+        state: &Arc<Mutex<ConversationState>>,
+        subagent_stack: &Arc<Mutex<Vec<SubagentFrame>>>,
+        bus: &Bus,
     ) -> crate::internal_tools::InternalToolOutcome {
         use crate::internal_tools as it;
         match name {
@@ -411,6 +480,10 @@ impl AgentActor {
                 InternalToolOutcome::ok(out)
             }
             "restart_from_file" => self.handle_restart_from_file(args, state).await,
+            "call_subagent" => {
+                self.handle_call_subagent(args, &state, subagent_stack, bus)
+                    .await
+            }
             "set_context_reminder" => {
                 let threshold = args.get("threshold_tokens")
                     .and_then(|v| v.as_u64())
@@ -585,6 +658,172 @@ impl AgentActor {
         ))
     }
 
+    /// Push current context onto subagent stack, clear state, and inject the
+    /// task text as a fresh user message. The parent's system_message is saved
+    /// in the frame so it can be restored on pop; `active_system_message` is
+    /// set to the subagent prompt (or cleared if none provided). Returns an
+    /// outcome with context_reset=true so the dispatch loop skips appending a
+    /// tool result — advance_turn_if_resolved will send the inner conversation.
+    async fn handle_call_subagent(
+        &self,
+        args: &serde_json::Value,
+        state: &Arc<Mutex<ConversationState>>,
+        subagent_stack: &Arc<Mutex<Vec<SubagentFrame>>>,
+        bus: &Bus,
+    ) -> InternalToolOutcome {
+        let task = match args.get("task").and_then(|v| v.as_str()) {
+            Some(s) if !s.trim().is_empty() => s.to_string(),
+            _ => return InternalToolOutcome::err("Missing 'task' parameter"),
+        };
+
+        // Optional subagent system prompt. If not provided, the parent's
+        // default system_message is inherited (active_system_message = None).
+        let sub_prompt: Option<String> = args
+            .get("system_prompt")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        {
+            let mut stack = subagent_stack.lock().await;
+            // Save the parent context. We snapshot messages + iteration_count +
+            // todos etc by cloning the entire ConversationState (transient
+            // fields like reasoning/partial are skipped since they're empty at
+            // tool-call dispatch time).
+            let frame = {
+                let s = state.lock().await;
+                SubagentFrame {
+                    saved_state: (*s).clone(),
+                    saved_system_message: self.system_message.clone(),
+                }
+            };
+            stack.push(frame);
+        }
+
+        // Clear the shared conversation state for the subagent's fresh context.
+        {
+            let mut s = state.lock().await;
+            s.clear_for_restart();
+            s.subagent_depth += 1;
+            if let Some(ref prompt) = sub_prompt {
+                s.active_system_message = Some(prompt.clone());
+            } else {
+                // Inherit parent system message (no override).
+                s.active_system_message = None;
+            }
+        }
+
+        info!(
+            "Agent {}: call_subagent pushed frame, depth={}",
+            self.index,
+            subagent_stack.lock().await.len()
+        );
+
+        let indent_msg = Message::new(
+            &self.stream_output_topic,
+            &self.id(),
+            format!("| [subagent] starting: {}", task),
+        )
+        .with_type("SubagentStart");
+        let _ = bus.publish(&self.id(), indent_msg).await;
+
+        // Inject the task as a fresh user message. advance_turn_if_resolved
+        // will pick it up and send to LLM.
+        {
+            let mut s = state.lock().await;
+            s.add_user_message(task.clone());
+            s.reset_iteration();
+            s.inference_in_flight = true;
+        }
+
+        InternalToolOutcome::ok(format!("Subagent started: {}", task))
+            .with_reset("Subagent context initialized.")
+    }
+
+    /// Pop the subagent stack and restore parent context. Called when inner
+    /// conversation completes (assistant text response, no pending tools).
+    /// The `result_text` is the assistant's final output from the inner turn,
+    /// which becomes the tool result for call_subagent in the restored parent.
+    async fn pop_subagent(
+        &self,
+        state: &Arc<Mutex<ConversationState>>,
+        subagent_stack: &Arc<Mutex<Vec<SubagentFrame>>>,
+        bus: &Bus,
+        result_text: String,
+    ) {
+        let frame = {
+            let mut stack = subagent_stack.lock().await;
+            if stack.is_empty() {
+                warn!("Agent {}: pop_subagent called but stack is empty", self.index);
+                return;
+            }
+            stack.pop().unwrap()
+        };
+
+        // Restore parent state. The saved_state already contains the assistant
+        // message with tool_calls=[{id:"call-X", function:{name:"call_subagent"}}]
+        // and pending_tool_calls={"call-X"}. We need to find that id so we can
+        // add a matching tool result.
+        let depth_after;
+        {
+            let mut s = state.lock().await;
+            *s = frame.saved_state.clone();
+            s.subagent_depth = s.subagent_depth.saturating_sub(1);
+            depth_after = s.subagent_depth;
+
+            // Find the call_subagent's tool_call_id by scanning for it in
+            // messages. The last assistant message with a "call_subagent"
+            // function name is ours.
+            let mut subagent_tc_id: Option<String> = None;
+            for msg in &s.messages {
+                if msg.get("role").and_then(|r| r.as_str()) == Some("assistant") {
+                    if let Some(tcs) = msg.get("tool_calls").and_then(|t| t.as_array()) {
+                        for tc in tcs {
+                            let name = tc["function"]["name"].as_str().unwrap_or("");
+                            if name == "call_subagent" {
+                                subagent_tc_id = Some(
+                                    tc["id"].as_str().unwrap_or("").to_string()
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            match subagent_tc_id {
+                Some(id) => {
+                    s.add_tool_result(&id, "call_subagent", &result_text, true);
+                    s.resolve_tool_call(&id);
+                }
+                None => {
+                    warn!("Agent {}: pop_subagent could not find call_subagent tool_call_id in restored state — result will be lost",
+                        self.index);
+                }
+            }
+
+            // Clear the active_system_message override since we're back to parent.
+            s.active_system_message = None;
+        }
+
+        info!(
+            "Agent {}: subagent popped, depth={}, result length={}",
+            self.index,
+            depth_after,
+            result_text.len()
+        );
+
+        let indent_msg = Message::new(
+            &self.stream_output_topic,
+            &self.id(),
+            format!("| [subagent] completed: {}", result_text.chars().take(200).collect::<String>()),
+        )
+        .with_type("SubagentEnd");
+        let _ = bus.publish(&self.id(), indent_msg).await;
+
+        // advance_turn_if_resolved will send the restored parent conversation
+        // to the LLM now that all tool calls (including call_subagent) are resolved.
+        self.advance_turn_if_resolved(bus, state, subagent_stack).await;
+    }
+
     async fn send_conversation(
         &self,
         bus: &Bus,
@@ -669,8 +908,14 @@ impl Actor for AgentActor {
     }
 
     async fn run(&self, bus: &Bus) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let state: Arc<tokio::sync::Mutex<ConversationState>> =
-            Arc::new(tokio::sync::Mutex::new(ConversationState::new()));
+        let state: Arc<Mutex<ConversationState>> =
+            Arc::new(Mutex::new(ConversationState::new()));
+
+        // Subagent stack — each frame holds the parent's ConversationState +
+        // system_message snapshot, saved on call_subagent push and restored
+        // when the inner conversation completes. Depth = stack.len().
+        let subagent_stack: Arc<Mutex<Vec<SubagentFrame>>> =
+            Arc::new(Mutex::new(Vec::new()));
 
         // Seed the discovered context window so the agent can report it before
         // the first StreamStats message arrives.
@@ -815,6 +1060,7 @@ impl Actor for AgentActor {
                                 ).with_type("Warning");
                                 let _ = bus.publish(&self.id(), warn_msg).await;
                             } else {
+                                let output_for_pop = output.clone();
                                 {
                                     let mut s = state.lock().await;
                                     // Inference is complete — clear the in-flight flag
@@ -823,8 +1069,25 @@ impl Actor for AgentActor {
                                     s.add_assistant_message(output);
                                     s.increment_iteration();
                                 }
-                                // Cross-turn loop detection (tie-breaker injection)
-                                let _ = self.maybe_break_cross_turn_loop(bus, &state).await;
+
+                                // Subagent completion detection: when inner
+                                // conversation produces a text-only response (no pending tool calls) and we're at depth > 0, pop back to parent.
+                                if !subagent_stack.lock().await.is_empty() {
+                                    let should_pop = {
+                                        let s = state.lock().await;
+                                        s.subagent_depth > 0 && !s.inference_in_flight && s.all_tool_calls_resolved()
+                                    };
+                                    if should_pop {
+                                        self.pop_subagent(&state, &subagent_stack, bus,
+                                            output_for_pop).await;
+                                    } else {
+                                        // Cross-turn loop detection (tie-breaker injection)
+                                        let _ = self.maybe_break_cross_turn_loop(bus, &state).await;
+                                    }
+                                } else {
+                                    // Cross-turn loop detection (tie-breaker injection)
+                                    let _ = self.maybe_break_cross_turn_loop(bus, &state).await;
+                                }
                             }
                         }
                         Err(RecvError::Lagged(n)) => warn!("Agent {} output lagged: {}", self.index, n),
@@ -931,7 +1194,7 @@ impl Actor for AgentActor {
                                     let _ = bus.publish(&self.id(), tool_status).await;
 
                                     let outcome =
-                                        self.handle_internal_tool(&func_name, &args, &state).await;
+                                        self.handle_internal_tool(&func_name, &args, &state, &subagent_stack, bus).await;
                                     let success = outcome.success;
                                     let display_snapshot = outcome.result_text.clone();
 
@@ -967,7 +1230,7 @@ impl Actor for AgentActor {
                                     ).with_type("LlmToolResult");
                                     let _ = bus.publish(&self.id(), stream_msg).await;
 
-                                    self.advance_turn_if_resolved(bus, &state).await;
+                                    self.advance_turn_if_resolved(bus, &state, &subagent_stack).await;
                                     continue;
                                 }
 
@@ -1045,7 +1308,7 @@ impl Actor for AgentActor {
                             ).with_type("LlmToolResult");
                             let _ = bus.publish(&self.id(), stream_msg).await;
 
-                            self.advance_turn_if_resolved(bus, &state).await;
+                            self.advance_turn_if_resolved(bus, &state, &subagent_stack).await;
                         }
                         Err(RecvError::Lagged(n)) => warn!("Agent {} tool_results lagged: {}", self.index, n),
                         Err(RecvError::Closed) => break,
@@ -1239,7 +1502,7 @@ impl Actor for AgentActor {
                         }
                         // If wake-ups injected pending messages and the loop is
                         // idle, kick off a turn to process them.
-                        self.advance_turn_if_resolved(bus, &state).await;
+                        self.advance_turn_if_resolved(bus, &state, &subagent_stack).await;
                     }
                 }
             }

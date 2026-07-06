@@ -98,7 +98,8 @@ impl TodoEntry {
 /// `ToolActorRunner`. Keep this set in sync with `internal_tool_defs`.
 pub const INTERNAL_TOOL_NAMES: &[&str] =
     &["todo_write", "todo_read", "restart_from_file",
-      "set_context_reminder", "schedule_wake_up"];
+      "set_context_reminder", "schedule_wake_up",
+      "call_subagent"];
 
 pub fn is_internal_tool(name: &str) -> bool {
     INTERNAL_TOOL_NAMES.contains(&name)
@@ -202,6 +203,27 @@ pub fn internal_tool_defs() -> Vec<serde_json::Value> {
                         }
                     },
                     "required": ["delay_seconds", "message"]
+                }
+            }
+        }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "call_subagent",
+                "description": "Spawn a subagent with a specific task. The main agent waits for the subagent to finish before continuing; output appears in the same chat window indented with '|'. Subagents can call nested subagents. Returns the result text from the subagent's work.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task": {
+                            "type": "string",
+                            "description": "The task instruction for the subagent."
+                        },
+                        "system_prompt": {
+                            "type": "string",
+                            "description": "Optional system prompt override for the subagent. If not provided, inherits parent's default system message."
+                        }
+                    },
+                    "required": ["task"]
                 }
             }
         }),
@@ -384,7 +406,7 @@ mod tests {
             .iter()
             .map(|d| d["function"]["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, vec!["todo_write", "todo_read", "restart_from_file", "set_context_reminder", "schedule_wake_up"]);
+        assert_eq!(names, vec!["todo_write", "todo_read", "restart_from_file", "set_context_reminder", "schedule_wake_up", "call_subagent"]);
     }
 
     #[test]
@@ -394,6 +416,7 @@ mod tests {
         assert!(is_internal_tool("restart_from_file"));
         assert!(is_internal_tool("set_context_reminder"));
         assert!(is_internal_tool("schedule_wake_up"));
+        assert!(is_internal_tool("call_subagent"));
         assert!(!is_internal_tool("bash"));
         assert!(!is_internal_tool("todo_list"));
     }

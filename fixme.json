@@ -272,7 +272,7 @@
   {
     "id": "f79330e8-8c12-478d-b4b5-abca2d79f678",
     "phrase": "design and implement the concept of subagents - the most frequent use case will be that the subagent is \"called\" with a specific task via an MCP tool; and the main agent waits for this subagent to finish before continuing (thus the subagent will show the output in the same chat window as the main agent, just with added \"|\" indentation. the subagent can in principle call nested subagent, etc, etc. the return value of subagent is the string with the result of the task.",
-    "done": false
+    "done": true
   },
   {
     "id": "13fec432-28b1-447e-bc36-9bb8ae3daa3f",
