@@ -392,6 +392,27 @@ impl AgentActor {
                 InternalToolOutcome::ok(out)
             }
             "restart_from_file" => self.handle_restart_from_file(args, state).await,
+            "set_context_reminder" => {
+                let threshold = args.get("threshold_tokens")
+                    .and_then(|v| v.as_u64())
+                    .ok_or_else(|| InternalToolOutcome::err("Missing 'threshold_tokens'"));
+                let message = match args.get("message").and_then(|m| m.as_str()) {
+                    Some(s) => s.to_string(),
+                    None => return InternalToolOutcome::err("Missing 'message'"),
+                };
+                match threshold {
+                    Ok(thresh) => {
+                        let mut s = state.lock().await;
+                        s.add_context_reminder(thresh, message);
+                        debug!("Agent {}: set context reminder at {} tokens", self.index, thresh);
+                        InternalToolOutcome::ok(format!(
+                            "Context reminder set: will inject when usage exceeds {} tokens.",
+                            thresh
+                        ))
+                    }
+                    Err(e) => e,
+                }
+            }
             _ => InternalToolOutcome::err(format!("Unknown internal tool: {}", name)),
         }
     }
@@ -1068,6 +1089,20 @@ impl Actor for AgentActor {
                             let status = {
                                 let mut s = state.lock().await;
                                 s.record_usage(usage, ctx_window);
+                                // Check one-shot context reminders — if any
+                                // threshold is crossed, inject the message into
+                                // pending_messages for the next turn.
+                                if let Some(input_tok) = s.last_usage.as_ref()
+                                    .and_then(|u| u.input_tokens)
+                                {
+                                    let injected = s.check_context_reminders(input_tok);
+                                    if !injected.is_empty() {
+                                        debug!(
+                                            "Agent {}: context reminder fired ({} messages)",
+                                            self.index, injected.len()
+                                        );
+                                    }
+                                }
                                 s.context_status_line()
                             };
                             debug!("Agent {}: {}", self.index, status);

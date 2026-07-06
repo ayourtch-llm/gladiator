@@ -97,7 +97,7 @@ impl TodoEntry {
 /// Names of tool calls handled internally by the agent, never dispatched to a
 /// `ToolActorRunner`. Keep this set in sync with `internal_tool_defs`.
 pub const INTERNAL_TOOL_NAMES: &[&str] =
-    &["todo_write", "todo_read", "restart_from_file"];
+    &["todo_write", "todo_read", "restart_from_file", "set_context_reminder"];
 
 pub fn is_internal_tool(name: &str) -> bool {
     INTERNAL_TOOL_NAMES.contains(&name)
@@ -155,6 +155,27 @@ pub fn internal_tool_defs() -> Vec<serde_json::Value> {
                         }
                     },
                     "required": ["filename"]
+                }
+            }
+        }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "set_context_reminder",
+                "description": "Set a one-shot context-usage reminder. When the agent's token usage crosses the specified threshold, the given message is injected once into the agent loop as a user message (e.g., 'Your context is at 150k tokens — please do a context refresh now'). The reminder fires only once per session and does not repeat.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "threshold_tokens": {
+                            "type": "number",
+                            "description": "The token count at which the reminder fires. When input_tokens exceeds this value, the message is injected."
+                        },
+                        "message": {
+                            "type": "string",
+                            "description": "The message to inject when the threshold is crossed."
+                        }
+                    },
+                    "required": ["threshold_tokens", "message"]
                 }
             }
         }),
@@ -337,7 +358,7 @@ mod tests {
             .iter()
             .map(|d| d["function"]["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, vec!["todo_write", "todo_read", "restart_from_file"]);
+        assert_eq!(names, vec!["todo_write", "todo_read", "restart_from_file", "set_context_reminder"]);
     }
 
     #[test]
@@ -345,6 +366,7 @@ mod tests {
         assert!(is_internal_tool("todo_write"));
         assert!(is_internal_tool("todo_read"));
         assert!(is_internal_tool("restart_from_file"));
+        assert!(is_internal_tool("set_context_reminder"));
         assert!(!is_internal_tool("bash"));
         assert!(!is_internal_tool("todo_list"));
     }

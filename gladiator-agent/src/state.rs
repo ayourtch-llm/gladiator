@@ -50,6 +50,23 @@ pub struct ConversationState {
     /// near-identical, the agent injects a tie-breaker perturbation.
     #[serde(skip)]
     pub recent_turn_hashes: Vec<u64>,
+    /// Context reminder thresholds set by the `record_conclusion` or future
+    /// internal tools. Each has an absolute token count and a message; when
+    /// usage crosses it, the message is injected once into pending_messages.
+    /// Transient — not serialized across restarts (a fresh context starts clean).
+    #[serde(skip)]
+    pub context_reminders: Vec<ContextReminder>,
+}
+
+/// A one-shot context-usage reminder. When `last_usage.input_tokens` exceeds
+/// `threshold_tokens`, the agent injects `message` as a user message into its
+/// own pending list, then marks `fired = true` so it never fires again.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextReminder {
+    pub threshold_tokens: u64,
+    pub message: String,
+    #[serde(default)]
+    pub fired: bool,
 }
 
 /// Subset of `gladiator_llm::Usage` mirrored locally so the agent crate
@@ -535,6 +552,48 @@ impl ConversationState {
         }
     }
 
+    /// Add a one-shot context reminder. When `last_usage.input_tokens` crosses
+    /// `threshold`, the agent injects `message` into pending_messages once.
+    pub fn add_context_reminder(&mut self, threshold: u64, message: String) {
+        // Replace existing reminder at same threshold (update message).
+        if let Some(r) = self.context_reminders.iter_mut()
+            .find(|r| r.threshold_tokens == threshold)
+        {
+            r.message = message;
+            r.fired = false; // re-arm on update
+            return;
+        }
+        self.context_reminders.push(ContextReminder {
+            threshold_tokens: threshold,
+            message,
+            fired: false,
+        });
+    }
+
+    /// Remove all context reminders (e.g., when clearing state).
+    pub fn clear_context_reminders(&mut self) {
+        self.context_reminders.clear();
+    }
+
+    /// Check if any unfired reminder thresholds have been crossed. Returns
+    /// messages to inject and marks them as fired.
+    pub fn check_context_reminders(&mut self, current_tokens: u64)
+        -> Vec<String>
+    {
+        let mut injected = Vec::new();
+        for r in &mut self.context_reminders {
+            if !r.fired && current_tokens >= r.threshold_tokens {
+                r.fired = true;
+                injected.push(r.message.clone());
+            }
+        }
+        // Inject into pending_messages so the agent loop picks them up.
+        for msg in &injected {
+            self.pending_messages.push(msg.clone());
+        }
+        injected
+    }
+
     /// Tokens remaining in the context window, computed from the last reported
     /// usage. `None` when either piece is unknown.
     pub fn context_remaining(&self) -> Option<u64> {
@@ -588,5 +647,6 @@ impl ConversationState {
         self.current_partial_response.clear();
         self.tool_call_order.clear();
         self.inference_in_flight = false;
+        self.context_reminders.clear();
     }
 }

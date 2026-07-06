@@ -755,3 +755,46 @@ fn context_status_line_without_window_shows_input_only() {
     assert!(line.contains("500"), "missing token count: {}", line);
     assert!(line.contains("window unknown"), "expected 'window unknown': {}", line);
 }
+
+#[test]
+fn context_reminder_fires_once_when_threshold_crossed() {
+    let mut state = ConversationState::new();
+    state.add_context_reminder(150_000, "Do a context refresh now.".into());
+    // Below threshold — no fire.
+    let injected = state.check_context_reminders(100_000);
+    assert!(injected.is_empty());
+    assert!(!state.context_reminders[0].fired);
+    // Above threshold — fires once.
+    let injected = state.check_context_reminders(160_000);
+    assert_eq!(injected.len(), 1);
+    assert_eq!(injected[0], "Do a context refresh now.");
+    assert!(state.context_reminders[0].fired);
+    // Second call at same/higher level — does not fire again.
+    let injected = state.check_context_reminders(200_000);
+    assert!(injected.is_empty());
+}
+
+#[test]
+fn context_reminder_update_rearms() {
+    let mut state = ConversationState::new();
+    state.add_context_reminder(100, "first message".into());
+    // Fire it.
+    let injected = state.check_context_reminders(200);
+    assert_eq!(injected.len(), 1);
+    assert!(state.context_reminders[0].fired);
+    // Update at same threshold — re-arms (fired=false).
+    state.add_context_reminder(100, "second message".into());
+    assert!(!state.context_reminders[0].fired);
+    assert_eq!(state.context_reminders.len(), 1); // replaced, not added
+}
+
+#[test]
+fn context_reminder_injects_into_pending() {
+    let mut state = ConversationState::new();
+    state.add_context_reminder(50, "Wake up!".into());
+    let injected = state.check_context_reminders(60);
+    assert_eq!(injected.len(), 1);
+    // The message should also be in pending_messages.
+    assert_eq!(state.pending_messages.len(), 1);
+    assert_eq!(state.pending_messages[0], "Wake up!");
+}
