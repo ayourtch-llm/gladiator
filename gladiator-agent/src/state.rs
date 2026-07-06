@@ -78,6 +78,10 @@ pub struct ConversationState {
     /// call_subagent push; cleared on pop.
     #[serde(skip)]
     pub active_system_message: Option<String>,
+    /// One-shot flag: auto-nudge at ~90% context has fired for this context.
+    /// Reset on clear_for_restart (fresh subagent context gets a fresh nudge).
+    #[serde(skip)]
+    pub context_nudge_fired: bool,
 }
 
 /// A one-shot context-usage reminder. When `last_usage.input_tokens` exceeds
@@ -792,6 +796,7 @@ impl ConversationState {
         self.inference_in_flight = false;
         self.context_reminders.clear();
         self.wake_ups.clear();
+        self.context_nudge_fired = false;
         // Note: surprises are NOT cleared here — they're drained via
         // take_surprises() in handle_restart_from_file before clear_for_restart,
         // so the agent can write tmp/surprises.md and spawn five-whys analysis.

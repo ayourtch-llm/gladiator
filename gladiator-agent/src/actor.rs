@@ -1086,6 +1086,64 @@ impl Actor for AgentActor {
                                     output.clone(),
                                 )
                                 .await;
+                            } else if msg_type == "LlmError" {
+                                // The LLM request failed (e.g. context overflow,
+                                // rate limit, provider error). Do NOT add the
+                                // error text as an assistant message — that
+                                // corrupts the conversation history and causes
+                                // consecutive-assistant-message loops.
+                                let is_context_overflow = output.contains("exceed_context_size")
+                                    || output.contains("exceeds the available context");
+                                {
+                                    let mut s = state.lock().await;
+                                    s.inference_in_flight = false;
+                                    s.clear_reasoning();
+                                    s.clear_partial_response();
+                                }
+                                let depth = {
+                                    let s = state.lock().await;
+                                    s.subagent_depth
+                                };
+                                // On context overflow in a subagent, summarize
+                                // the subagent's run so the parent gets useful
+                                // output instead of a raw error.
+                                let pop_result: Option<String> = if is_context_overflow
+                                    && depth > 0
+                                    && !subagent_stack.lock().await.is_empty()
+                                {
+                                    let summary = {
+                                        let s = state.lock().await;
+                                        s.recent_messages_summary(10)
+                                    };
+                                    let warn_text = format!(
+                                        "[subagent ran out of context, here is the summary of what it achieved]\n\n{}",
+                                        summary
+                                    );
+                                    let warn_msg = Message::new(
+                                        &self.stream_output_topic,
+                                        &self.id(),
+                                        "[subagent] ran out of context — returning summary",
+                                    ).with_type("Warning");
+                                    let warn_msg = self.stamp_depth_sync(warn_msg, depth);
+                                    let _ = bus.publish(&self.id(), warn_msg).await;
+                                    Some(warn_text)
+                                } else {
+                                    let warn_msg = Message::new(
+                                        &self.stream_output_topic,
+                                        &self.id(),
+                                        format!("[llm error] {}", output),
+                                    ).with_type("Warning");
+                                    let warn_msg = self.stamp_depth_sync(warn_msg, depth);
+                                    let _ = bus.publish(&self.id(), warn_msg).await;
+                                    if depth > 0 && !subagent_stack.lock().await.is_empty() {
+                                        Some(format!("[llm error] {}", output))
+                                    } else {
+                                        None
+                                    }
+                                };
+                                if let Some(result_text) = pop_result {
+                                    self.pop_subagent(&state, &subagent_stack, bus, result_text).await;
+                                }
                             } else if output.starts_with("Interrupted:") {
                                 let mut s = state.lock().await;
                                 s.was_interrupted = true;
@@ -1625,22 +1683,40 @@ impl Actor for AgentActor {
                                 s.context_status_line()
                             };
                             debug!("Agent {}: {}", self.index, status);
-                            // If we're close to the limit, surface a chat-level
-                            // warning so the model (and the user) notice.
-                            let remaining = state.lock().await.context_remaining();
-                            let window = state.lock().await.context_window;
-                            if let (Some(rem), Some(win)) = (remaining, window) {
-                                if win > 0 && rem * 5 < win as u64 {
-                                    let warn_msg = Message::new(
-                                        &self.stream_output_topic,
-                                        &self.id(),
-                                        format!(
-                                            "Context nearly full: {} tokens remaining ({}%). Consider calling restart_from_file with a handoff note.",
-                                            rem,
-                                            (rem as f64 / win as f64 * 100.0) as u64
-                                        ),
-                                    ).with_type("Warning");
-                                    let _ = bus.publish(&self.id(), warn_msg).await;
+                            // Auto-nudge at ~90% context: inject a pending
+                            // message telling the agent to wrap up. One-shot
+                            // per context (reset on clear_for_restart).
+                            // - Subagent (depth > 0): wrap up and return answer.
+                            // - Root agent (depth 0): write handoff + restart_from_file.
+                            {
+                                let mut s = state.lock().await;
+                                if let (Some(rem), Some(win), false) =
+                                    (s.context_remaining(), s.context_window, s.context_nudge_fired)
+                                {
+                                    if win > 0 && rem * 10 < (win as u64) {
+                                        s.context_nudge_fired = true;
+                                        let (nudge_text, warn_text) = if s.subagent_depth > 0 {
+                                            (
+                                                "Context is nearly full. STOP exploring now — provide your best answer based on what you've learned so far. Do not call any more tools.".to_string(),
+                                                format!("Subagent context at 90% — auto-nudge to wrap up ({} of {} tokens remaining)", rem, win),
+                                            )
+                                        } else {
+                                            (
+                                                "Context is nearly full. Write a self-contained handoff note (goal, what's done, what's next, key file paths) to a file, then call restart_from_file with that path to continue.".to_string(),
+                                                format!("Context at 90% — auto-nudge to compact + restart ({} of {} tokens remaining)", rem, win),
+                                            )
+                                        };
+                                        s.pending_messages.push(nudge_text);
+                                        let depth = s.subagent_depth;
+                                        drop(s);
+                                        let warn_msg = Message::new(
+                                            &self.stream_output_topic,
+                                            &self.id(),
+                                            warn_text,
+                                        ).with_type("Warning");
+                                        let warn_msg = self.stamp_depth_sync(warn_msg, depth);
+                                        let _ = bus.publish(&self.id(), warn_msg).await;
+                                    }
                                 }
                             }
                         }

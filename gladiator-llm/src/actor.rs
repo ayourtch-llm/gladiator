@@ -585,7 +585,7 @@ impl Actor for LlmActor {
                                         &self.output_topic,
                                         &self.id(),
                                         format!("Error: {}", e),
-                                    );
+                                    ).with_type("LlmError");
                                     let _ = bus.publish(&self.id(), error_msg).await;
                                 }
                                 Err(e) => {
