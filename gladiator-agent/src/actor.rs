@@ -1,3 +1,4 @@
+use crate::five_whys::{IncidentReport, Surprise};
 use crate::internal_tools::InternalToolOutcome;
 use crate::state::ConversationState;
 use gladiator_core::{Actor, ActorAnnouncement, AgentConfig, Bus, Message};
@@ -197,10 +198,17 @@ impl AgentActor {
                 Message::new(&self.input_topic, &self.id(), inject),
             )
             .await;
+
+        // Record a surprise for five-whys analysis on context refresh.
+        {
+            let mut s = state.lock().await;
+            s.record_surprise(Surprise::new(
+                "cross_turn_loop",
+                format!("{} consecutive near-identical turns (streak={})", streak, removed),
+            ));
+        }
         true
     }
-
-    /// Stuck-model triage: called when the LLM either went idle (>90s no
     /// tokens) or got caught in a think-loop by the similarity detector. Saves
     /// the partial response, warns the TUI, asks a standalone `llm_call` what
     /// the model was likely trying to do, and injects the guidance as a user
@@ -220,6 +228,12 @@ impl AgentActor {
             if !partial.is_empty() {
                 s.add_assistant_message(partial.clone());
             }
+            // Record a surprise for five-whys analysis on context refresh.
+            let kind = if reason.contains("idle") { "idle_timeout" } else { "within_stream_loop" };
+            s.record_surprise(
+                Surprise::new(kind, format!("triage: {}", reason))
+                    .with_trace(&partial),
+            );
         }
 
         let warn = Message::new(
@@ -302,6 +316,11 @@ impl AgentActor {
         }
         if s.max_reached(self.max_iterations) {
             let summary = s.recent_messages_summary(10);
+            // Record a surprise for five-whys analysis on context refresh.
+            s.record_surprise(Surprise::new(
+                "max_iterations",
+                format!("hit {} iterations limit", self.max_iterations),
+            ).with_trace(&summary));
             drop(s);
             // Graceful recovery: persist a handoff file so the conversation
             // can be resumed via the restart_from_file internal tool.
@@ -510,6 +529,36 @@ impl AgentActor {
             "Agent {}: restart_from_file backing up context to {}",
             self.index, backup_path
         );
+
+        // Before clearing the conversation state, drain all recorded surprises,
+        // write them to tmp/surprises.md, and spawn async five-whys analyses.
+        let surprises = {
+            let mut s = state.lock().await;
+            s.take_surprises()
+        };
+        if !surprises.is_empty() {
+            let md_content = crate::five_whys::write_surprises_md(&surprises);
+            let _ = std::fs::create_dir_all("tmp");
+            let _ = std::fs::write("tmp/surprises.md", &md_content);
+            info!(
+                "Agent {}: wrote tmp/surprises.md ({} incidents) before context refresh",
+                self.index,
+                surprises.len()
+            );
+
+            // Spawn five-whys analyses per spec in tmp/five-whys.md.
+            if let Some(ref llm_cfg) = self.llm_config {
+                for surprise in &surprises {
+                    let report = IncidentReport::from_surprise(surprise, &[]);
+                    crate::five_whys::run_five_whys(llm_cfg, report);
+                }
+            } else {
+                warn!(
+                    "Agent {}: cannot run five-whys analysis — no llm_config available",
+                    self.index
+                );
+            }
+        }
 
         let instruction = it::build_restart_instruction(&content);
         {

@@ -212,7 +212,7 @@
   {
     "id": "10d72181-323a-4405-b3ff-5404e6647c56",
     "phrase": "Pasting the text results in a very very slow character-by-character insertion; we should improve the performance of that - and maybe treat the large amount of text somehow specially, without per-char screen redraw ?",
-    "done": false
+    "done": true
   },
   {
     "id": "24a35580-9977-4e49-9812-5eb47fab24b9",
@@ -227,7 +227,7 @@
   {
     "id": "4353a71e-2658-4294-9d3a-38942175ad8c",
     "phrase": "As part of the context refresh, agent also needs to write a file surprises.md, which would contain all the surprizes it encountered in the session so far, and then perform the five-why analysis on them according to  tmp/five-whys.md",
-    "done": false
+    "done": true
   },
   {
     "id": "60447fbd-6ffd-4108-a1dc-fe948bd3c844",
@@ -237,31 +237,61 @@
   {
     "id": "50f9822f-33a4-4215-862b-74842c658c10",
     "phrase": "Could we have the result of [tool] entry and the tool call result entry be presented in aesthetically pleasing and readable way - like, a nice red-green diff in case it is an edit, or a command + its result if it was a command run ?",
-    "done": false
+    "done": true
   },
   {
     "id": "e5d0a184-0549-4184-bb16-a74e7e33d119",
     "phrase": "Could we have the counter of chars returned be seen in the UI similar to the state of \"Working...\" in the state where we are accumulating a tool call ?",
-    "done": false
+    "done": true
   },
   {
     "id": "4b4b92b5-6683-4bf4-a8ed-a6235be59d65",
     "phrase": "add an internal tool to manipulate \"context reminders\": a warning thresholds, which, when crossed, would cause a one-time injection of the configurable message into the agent loop",
-    "done": false
+    "done": true
   },
   {
     "id": "270d1cfe-2836-4d8d-ac40-dad71da16d57",
     "phrase": "add one-time and cron wake-ups: configurable messages that would be injected into the agent loop on schedule - also be able to inject those only if the loop is idle, and cancel otherwise.",
-    "done": false
+    "done": true
   },
   {
     "id": "d9d742bb-8d28-4c9f-98a6-d3e541069f9b",
     "phrase": "add ability to use rust-analyzer on multiple projects at once, not just the main project root - or at least switch between the two. Have the tools to query active project(s) and to switch them.",
-    "done": false
+    "done": true
   },
   {
     "id": "f1a2b3c4-0001-4000-8000-0000000000fe",
     "phrase": "If a user sends a pending message (while agent is busy) and then presses ESC-ESC to interrupt, the pending message remains stuck in pending_messages forever. The interrupt path should drain/clear pending messages so they do not accumulate and confuse the agent on the next turn.",
+    "done": true
+  },
+  {
+    "id": "e3b4c5d6-0001-4000-8000-0000000000ff",
+    "phrase": "cargo test should run all tests reliably. Current issues: (1) e2e_test has 2 #[ignore] tests that need --ignored to run — they should either be un-ignored if they work, or moved behind a feature gate. (2) mcp-rlsp integration tests hang indefinitely (they spawn RA which takes 300s) — they need a timeout or #[ignore] with a separate test runner. (3) 2 pre-existing TUI test failures (input_state_history_basic, input_state_history_no_duplicates_consecutive) need to be fixed or the tests updated to match current behavior. Goal: \"cargo test --workspace\" exits 0 in under 60s with no hangs.",
+    "done": true
+  },
+  {
+    "id": "f79330e8-8c12-478d-b4b5-abca2d79f678",
+    "phrase": "design and implement the concept of subagents - the most frequent use case will be that the subagent is \"called\" with a specific task via an MCP tool; and the main agent waits for this subagent to finish before continuing (thus the subagent will show the output in the same chat window as the main agent, just with added \"|\" indentation. the subagent can in principle call nested subagent, etc, etc. the return value of subagent is the string with the result of the task.",
     "done": false
+  },
+  {
+    "id": "13fec432-28b1-447e-bc36-9bb8ae3daa3f",
+    "phrase": "for the estimation of the prefill (\"Thinking...\") phase - use a better estimation than linear - measure the previous prefills sizes + milliseconds taken, and then use that to derive polynomial 5th degree approximation which you use to then predict the time based on the anticipated prefill size.",
+    "done": true
+  },
+  {
+    "id": "c5d6e7f8-0001-4000-8000-000000000001",
+    "phrase": "Replace string-based tool call/result rendering with structured AppMessage fields. Currently bus_to_app_message flattens structured JSON ({function:{name,args}}) to a string, then render.rs string-matches (is_diff checks first line == \"edit_file\", is_bash checks for \"[bash]\" or \"$\" prefix) to decide formatting. This is fragile: a trailing space broke diff coloring (fixed in a77203e), parse_tool_result_id regex-parses formatted strings to recover the tool_call_id. Design: add optional structured fields to AppMessage (tool_name: Option<String>, tool_args: Option<Value>, tool_result: Option<String>, tool_kind: Option<ToolKind> enum {Edit, Bash, Read, Mcp, Other}). bus_to_app_message populates these from the structured bus payload. render.rs pattern-matches on tool_kind instead of string content. Eliminates all string-comparison fragility. Migration: keep content as fallback display text, add structured fields alongside, switch render.rs to prefer structured when present.",
+    "done": true
+  },
+  {
+    "id": "17361737-15e2-48fe-abab-558c56dfa6c1",
+    "phrase": "fix the broken tests - if they do not correspond to the reality anymore, adapt the tests to correspond to new reality, else if they highlight bugs - then fix the bugs",
+    "done": true
+  },
+  {
+    "id": "542a763b-ffcb-4a66-adc8-aed9edfc41f4",
+    "phrase": "render todo_write tool result in a nicer way, rather than a lot of text",
+    "done": true
   }
 ]

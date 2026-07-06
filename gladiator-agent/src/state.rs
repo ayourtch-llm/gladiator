@@ -1,3 +1,4 @@
+use crate::five_whys::Surprise;
 use crate::internal_tools::{render_todos, TodoEntry};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -62,6 +63,11 @@ pub struct ConversationState {
     /// Transient — not serialized across restarts.
     #[serde(skip)]
     pub wake_ups: Vec<WakeUp>,
+    /// Surprises recorded during the session (stuck-model loops, cross-turn
+    /// loops, max-iterations). Written to tmp/surprises.md on context refresh,
+    /// then analyzed via five-whys llm_call per spec in tmp/five-whys.md.
+    #[serde(skip)]
+    pub surprises: Vec<Surprise>,
 }
 
 /// A one-shot context-usage reminder. When `last_usage.input_tokens` exceeds
@@ -709,7 +715,18 @@ impl ConversationState {
         injected
     }
 
-    /// Tokens remaining in the context window, computed from the last reported
+    /// Record a surprise (unexpected incident) during the session. Called at
+    /// trigger sites: triage_stuck_model, maybe_break_cross_turn_loop,
+    /// max-iterations reached. These are written to tmp/surprises.md and fed
+    /// into five-whys analysis on context refresh.
+    pub fn record_surprise(&mut self, surprise: Surprise) {
+        self.surprises.push(surprise);
+    }
+
+    /// Drain all recorded surprises (for writing before context refresh).
+    pub fn take_surprises(&mut self) -> Vec<Surprise> {
+        std::mem::take(&mut self.surprises)
+    }
     /// usage. `None` when either piece is unknown.
     pub fn context_remaining(&self) -> Option<u64> {
         let window = self.context_window? as u64;
@@ -764,5 +781,8 @@ impl ConversationState {
         self.inference_in_flight = false;
         self.context_reminders.clear();
         self.wake_ups.clear();
+        // Note: surprises are NOT cleared here — they're drained via
+        // take_surprises() in handle_restart_from_file before clear_for_restart,
+        // so the agent can write tmp/surprises.md and spawn five-whys analysis.
     }
 }
