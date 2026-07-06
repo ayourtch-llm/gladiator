@@ -107,7 +107,7 @@ expose = []
 
 [mcp_servers.mcp-tagged-fileops]
 command = ["target/release/mcp-tagged-fileops"]
-default = false
+default = true
 expose = []
 
 [mcp_servers.mcp-loader]

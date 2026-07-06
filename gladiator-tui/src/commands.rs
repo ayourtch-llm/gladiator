@@ -71,7 +71,8 @@ pub fn parse_tui_command(text: &str) -> Option<TuiCommand> {
             _ => None,
         };
     } else if trimmed == "/help" || trimmed == "/?" {
-        // Not a TUI command — let it pass to the agent as text.
+        // Return None so it passes to the agent as text — the system prompt
+        // instructs the agent about its capabilities.
         return None;
     }
     None
