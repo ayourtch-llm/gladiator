@@ -747,6 +747,12 @@ impl Actor for AgentActor {
                                 s.was_interrupted = true;
                                 s.inference_in_flight = false;
                                 s.clear_reasoning();
+                                // Drain pending user messages so they don't
+                                // accumulate and confuse the agent on next turn.
+                                // The interrupt means the user wants to change
+                                // direction, not continue with queued messages.
+                                let _drained: Vec<String> =
+                                    std::mem::take(&mut s.pending_messages);
                                 // Preserve partial assistant text that was streamed before the interrupt
                                 if let Some(partial) = s.drain_partial_response() {
                                     s.add_assistant_message(partial);

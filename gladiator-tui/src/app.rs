@@ -1269,6 +1269,9 @@ pub async fn run_app(
                             );
                             let _ = bus.publish("gladiator-tui", msg).await;
                             app.chat_mut().add_message(AppMessage::system("Stopping inference..."));
+                            // Clear pending messages so they don't accumulate
+                            // and confuse the agent on next turn.
+                            app.clear_pending_messages();
                             app.scroll_mut().scroll_to_bottom();
                             app.stop_spinner();
                             app.set_status("Interrupt sent");
