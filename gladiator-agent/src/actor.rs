@@ -174,12 +174,11 @@ impl AgentActor {
 
     /// Stamp a message with the current subagent depth (from ConversationState)
     /// so the TUI can indent nested output. No-op when at top level (depth 0).
-    async fn stamp_depth(
-        &self,
-        msg: Message,
-        state: &Arc<Mutex<ConversationState>>,
-    ) -> Message {
-        let depth = state.lock().await.subagent_depth;
+    /// Stamp the current subagent depth onto a bus message. Sync — the
+    /// caller is responsible for reading `depth` while it already holds the
+    /// state lock (avoids a second lock acquire, which would deadlock since
+    /// tokio::sync::Mutex is not reentrant).
+    fn stamp_depth_sync(&self, msg: Message, depth: usize) -> Message {
         if depth > 0 {
             msg.with_depth(depth)
         } else {
@@ -350,15 +349,10 @@ impl AgentActor {
         subagent_stack: &Arc<Mutex<Vec<SubagentFrame>>>,
     ) {
         let mut s = state.lock().await;
-        info!("Agent {} advance_turn_if_resolved depth={} all_resolved={} pending_msgs={} pending_tools={}",
-              self.index, s.subagent_depth, s.all_tool_calls_resolved(),
-              s.pending_messages.len(), s.pending_tool_calls.len());
         if !s.all_tool_calls_resolved() {
             return;
         }
         let pending = s.drain_pending_messages();
-        info!("Agent {} advance_turn_if_resolved drained {} pending message(s)",
-              self.index, pending.len());
         if !pending.is_empty() {
             s.reset_iteration();
             let depth = s.subagent_depth;
@@ -794,14 +788,6 @@ impl AgentActor {
             stack.pop().unwrap()
         };
 
-        // Diagnostic: log pending messages at pop time.
-        {
-            let s = state.lock().await;
-            info!("Agent {} pop_subagent: depth={} pending_msgs={} pending_tools={} inference={}",
-                  self.index, s.subagent_depth, s.pending_messages.len(),
-                  s.pending_tool_calls.len(), s.inference_in_flight);
-        }
-
         // Restore parent state. The saved_state already contains the assistant
         // message with tool_calls=[{id:"call-X", function:{name:"call_subagent"}}]
         // and pending_tool_calls={"call-X"}. We need to find that id so we can
@@ -1013,13 +999,8 @@ impl Actor for AgentActor {
 
                             {
                                 let mut s = state.lock().await;
-                                info!("Agent {} input_rx depth={} inference_in_flight={} pending_tool_calls={} pending_messages={}",
-                                      self.index, s.subagent_depth, s.inference_in_flight,
-                                      s.pending_tool_calls.len(), s.pending_messages.len());
                                 if !s.pending_tool_calls.is_empty() || s.inference_in_flight {
                                     s.buffer_user_message(user_message.clone());
-                                    info!("Agent {} buffered to pending (now {} messages)",
-                                          self.index, s.pending_messages.len());
                                     drop(s);
                                     // Notify TUI that this message is queued (pending)
                                     let queued_msg = Message::new(
@@ -1125,13 +1106,6 @@ impl Actor for AgentActor {
                                 // Subagent completion detection: when inner
                                 // conversation produces a text-only response (no pending tool calls) and we're at depth > 0, pop back to parent.
                                 if !subagent_stack.lock().await.is_empty() {
-                                    let stack_depth = {
-                                        let s = state.lock().await;
-                                        info!("Agent {} text-response subagent check: depth={} inference={} pending_tools={} pending_msgs={}",
-                                              self.index, s.subagent_depth, s.inference_in_flight,
-                                              s.pending_tool_calls.len(), s.pending_messages.len());
-                                        s.subagent_depth
-                                    };
                                     // Before popping, check if the user sent
                                     // messages to steer the subagent. If so,
                                     // drain them into the subagent's
@@ -1149,14 +1123,16 @@ impl Actor for AgentActor {
                                             for m in &pending {
                                                 s.add_user_message(m.clone());
                                             }
+                                            let depth = s.subagent_depth;
                                             let displayed = Message::new(
                                                 &self.stream_output_topic,
                                                 &self.id(),
                                                 pending.last().unwrap().clone(),
                                             ).with_type("UserMessageDisplayed");
+                                            let displayed = self.stamp_depth_sync(displayed, depth);
                                             drop(s);
-                                            let _ = bus.publish(&self.id(), self.stamp_depth(displayed, &state).await).await;
-                                            state.lock().await.subagent_depth
+                                            let _ = bus.publish(&self.id(), displayed).await;
+                                            depth
                                         };
                                         info!("Agent {}: subagent at depth {} received {} pending user message(s), continuing turn",
                                               self.index, depth, pending.len());
@@ -1175,8 +1151,6 @@ impl Actor for AgentActor {
                                             s.subagent_depth > 0 && !s.inference_in_flight && s.all_tool_calls_resolved()
                                         };
                                         if should_pop {
-                                            info!("Agent {} popping subagent at depth {} (no pending messages)",
-                                                  self.index, stack_depth);
                                             self.pop_subagent(&state, &subagent_stack, bus,
                                                 output_for_pop).await;
                                         } else {
@@ -1331,7 +1305,8 @@ impl Actor for AgentActor {
                                             "text": format!("Calling tool: {}({})", func_name, func_args_str),
                                         }),
                                     ).with_type("Info");
-                                    let tool_status = self.stamp_depth(tool_status, &state).await;
+                                    let depth = state.lock().await.subagent_depth;
+                                    let tool_status = self.stamp_depth_sync(tool_status, depth);
                                     let _ = bus.publish(&self.id(), tool_status).await;
 
                                     let outcome =
@@ -1369,7 +1344,8 @@ impl Actor for AgentActor {
                                             display_snapshot,
                                         ),
                                     ).with_type("LlmToolResult");
-                                    let stream_msg = self.stamp_depth(stream_msg, &state).await;
+                                    let depth = state.lock().await.subagent_depth;
+                                    let stream_msg = self.stamp_depth_sync(stream_msg, depth);
                                     let _ = bus.publish(&self.id(), stream_msg).await;
 
                                     self.advance_turn_if_resolved(bus, &state, &subagent_stack).await;
@@ -1391,7 +1367,8 @@ impl Actor for AgentActor {
                                         "text": format!("Calling tool: {}({})", func_name, func_args_str),
                                     }),
                                 ).with_type("Info");
-                                let tool_status = self.stamp_depth(tool_status, &state).await;
+                                let depth = state.lock().await.subagent_depth;
+                                let tool_status = self.stamp_depth_sync(tool_status, depth);
                                 let _ = bus.publish(&self.id(), tool_status).await;
 
                                 let exec_payload = serde_json::json!({
@@ -1449,7 +1426,8 @@ impl Actor for AgentActor {
                                     result_text
                                 ),
                             ).with_type("LlmToolResult");
-                            let stream_msg = self.stamp_depth(stream_msg, &state).await;
+                            let depth = state.lock().await.subagent_depth;
+                            let stream_msg = self.stamp_depth_sync(stream_msg, depth);
                             let _ = bus.publish(&self.id(), stream_msg).await;
 
                             self.advance_turn_if_resolved(bus, &state, &subagent_stack).await;

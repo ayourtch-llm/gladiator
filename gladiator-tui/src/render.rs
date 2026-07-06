@@ -261,10 +261,10 @@ impl Renderer {
             AppMessageRole::System => ("[sys]", self.theme.color_text_muted(), self.theme.color_text_muted()),
         };
 
-        // Subagent indentation: prepend "| " per depth level so nested output
+        // Subagent indentation: prepend " | " per depth level so nested output
         // is visually indented in the chat window.
         let indent_str = if msg.depth > 0 {
-            "| ".repeat(msg.depth)
+            " | ".repeat(msg.depth)
         } else {
             String::new()
         };
