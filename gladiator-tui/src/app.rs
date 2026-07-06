@@ -38,8 +38,12 @@ pub struct App {
     spinner_frame: usize,
     last_spinner_advance: Option<Instant>,
     stream_rx_chars: usize,
-    /// Last reported input-token count from StreamStats (for context display).
-    ctx_used_tokens: Option<u64>,
+    /// Per-depth stack of last reported input-token counts from StreamStats
+    /// (for context display). Index 0 is the top-level agent; each
+    /// SubagentStart pushes a new entry (None until its first stats arrive)
+    /// and each SubagentEnd pops it, so the status bar shows how the context
+    /// window is distributed across the subagent stack.
+    ctx_stack: Vec<Option<u64>>,
     /// Model context window in tokens, when known.
     ctx_window: Option<usize>,
     /// True during the prefill phase (request sent, no token received yet).
@@ -98,7 +102,7 @@ impl App {
             spinner_frame: 0,
             last_spinner_advance: None,
             stream_rx_chars: 0,
-            ctx_used_tokens: None,
+            ctx_stack: Vec::new(),
             ctx_window: None,
             is_prefill: false,
             pending_tool_calls: 0,
@@ -154,7 +158,7 @@ impl App {
     /// Reset context-usage tracking. Called when the session is restarted
     /// from file (or otherwise reset), so stale token counts don't linger.
     pub fn reset_context_usage(&mut self) {
-        self.ctx_used_tokens = None;
+        self.ctx_stack.clear();
         self.ctx_window = None;
         // Also clear ETA history — a loaded/restarted session has different
         // context characteristics, past timing data is unreliable.
@@ -227,13 +231,27 @@ impl App {
 
     /// Status string with spinner prefix when busy.
     pub fn display_status(&self) -> String {
-        let ctx_part = match (self.ctx_used_tokens, self.ctx_window) {
-            (Some(used), Some(win)) if win > 0 => {
-                let pct = ((used as f64 / win as f64 * 100.0).min(100.0)) as u64;
-                format!(" | ctx {}/{} {}%", used, win, pct)
+        // Stacked context display: one counter per subagent depth, joined
+        // left-to-right (top-level first, active subagent rightmost). The
+        // window/percent annotation applies to the rightmost (active) level.
+        // "?" marks a level whose first stats haven't arrived yet.
+        let ctx_part = if self.ctx_stack.is_empty() {
+            String::new()
+        } else {
+            let joined = self
+                .ctx_stack
+                .iter()
+                .map(|e| e.map(|t| t.to_string()).unwrap_or_else(|| "?".to_string()))
+                .collect::<Vec<_>>()
+                .join(" \u{25b8} ");
+            match (self.ctx_stack.last().copied().flatten(), self.ctx_window) {
+                (Some(used), Some(win)) if win > 0 => {
+                    let pct = ((used as f64 / win as f64 * 100.0).min(100.0)) as u64;
+                    format!(" | ctx {}/{} {}%", joined, win, pct)
+                }
+                (Some(_), _) => format!(" | ctx {} tok", joined),
+                _ => format!(" | ctx {}", joined),
             }
-            (Some(used), None) => format!(" | ctx {} tok", used),
-            _ => String::new(),
         };
         if self.is_busy {
             let (label, detail) = if self.pending_tool_calls > 0 {
@@ -625,12 +643,34 @@ impl App {
         // drops them) so we can show "ctx: N/M tok" in the status bar. Also
         // stash input_tokens as a proxy for this request's size — it will be
         // used to estimate ETA on the next prefill.
+        // Subagent context stacking: a new subagent pushes a fresh counter to
+        // the right of the stack; its StreamStats update that entry; on pop
+        // the entry disappears, revealing the parent's last-known count.
+        if msg_type == "SubagentStart" {
+            if self.ctx_stack.is_empty() {
+                // Ensure the top-level slot exists so the subagent's counter
+                // visibly sits to its right even before any top-level stats.
+                self.ctx_stack.push(None);
+            }
+            self.ctx_stack.push(None);
+        }
+        if msg_type == "SubagentEnd" && self.ctx_stack.len() > 1 {
+            self.ctx_stack.pop();
+        }
+
         if msg_type == "StreamStats" {
             let usage = msg.payload.get("usage");
             let input_tok = usage
                 .and_then(|u| u.get("input_tokens"))
                 .and_then(|v| v.as_u64());
-            self.ctx_used_tokens = input_tok;
+            if self.ctx_stack.is_empty() {
+                self.ctx_stack.push(None);
+            }
+            // Stats always belong to the innermost (rightmost) active level.
+            // Keep the previous count when a stats message carries no usage.
+            if input_tok.is_some() {
+                *self.ctx_stack.last_mut().unwrap() = input_tok;
+            }
             // Remember the most recent input-token count for ETA estimation.
             if let Some(tok) = input_tok {
                 self.current_request_input_tokens = Some(tok);
@@ -1451,6 +1491,42 @@ fn strip_tool_result_header(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stats_msg(input_tokens: u64) -> Message {
+        Message::new(
+            "stream",
+            "llm",
+            serde_json::json!({ "usage": { "input_tokens": input_tokens } }),
+        )
+        .with_type("StreamStats")
+    }
+
+    #[test]
+    fn ctx_stack_pushes_and_pops_with_subagents() {
+        let mut app = App::new(crate::theme::Theme::default());
+
+        // Top-level stats populate the base entry.
+        app.handle_bus_message(&stats_msg(16992));
+        assert!(app.display_status().contains("ctx 16992"));
+
+        // Subagent starts: a fresh "?" counter appears to the right.
+        let start = Message::new("stream", "agent", "[subagent] starting: task")
+            .with_type("SubagentStart");
+        app.handle_bus_message(&start);
+        assert!(app.display_status().contains("ctx 16992 \u{25b8} ?"));
+
+        // Subagent's stats update the rightmost entry, parent stays frozen.
+        app.handle_bus_message(&stats_msg(3211));
+        assert!(app.display_status().contains("ctx 16992 \u{25b8} 3211"));
+
+        // Pop: the subagent's counter disappears, parent's count remains.
+        let end = Message::new("stream", "agent", "[subagent] completed")
+            .with_type("SubagentEnd");
+        app.handle_bus_message(&end);
+        let status = app.display_status();
+        assert!(status.contains("ctx 16992"));
+        assert!(!status.contains("3211"));
+    }
 
     #[test]
     fn polynomial_predict_linear_data() {
