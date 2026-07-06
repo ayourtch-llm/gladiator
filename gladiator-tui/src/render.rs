@@ -270,16 +270,19 @@ impl Renderer {
 
         // Tool messages: no wrapping, preserve exact whitespace, apply h_offset
         if msg.role == AppMessageRole::Tool {
-            // Diff-rendered tool calls (edit_file / plan_edits) are shown in
-            // full with color — never collapsed.
-            let is_diff = msg.content.contains('\n')
-                && {
-                    let first_line = msg.content.split('\n').next().unwrap_or("");
-                    matches!(
-                        first_line.trim(),
-                        "edit_file" | "apply_edits" | "plan_edits"
-                    )
-                };
+            // Use structured tool_kind when available; fall back to content-
+            // matching for legacy messages without metadata.
+            let is_diff = match msg.tool_kind.as_ref() {
+                Some(crate::state::ToolKind::Edit) => true,
+                _ => msg.content.contains('\n')
+                    && {
+                        let first_line = msg.content.split('\n').next().unwrap_or("");
+                        matches!(
+                            first_line.trim(),
+                            "edit_file" | "apply_edits" | "plan_edits"
+                        )
+                    },
+            };
 
             if is_diff {
                 let all_lines: Vec<&str> = msg.content.split('\n').collect();
@@ -333,7 +336,10 @@ impl Renderer {
 
             // Collapse long tool results: first N lines + ellipsis hint.
             // Command tools (bash/run_command) get a larger budget, others 3.
-            let is_bash = msg.content.starts_with("$ ");
+            let is_bash = match msg.tool_kind.as_ref() {
+                Some(crate::state::ToolKind::Bash) => true,
+                _ => msg.content.starts_with("$ "),
+            };
             let max_lines = if is_bash { 10 } else { 3 };
 
             let all_lines: Vec<&str> = msg.content.split('\n').collect();

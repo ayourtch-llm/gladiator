@@ -9,6 +9,18 @@ pub enum AppMessageRole {
     System,
 }
 
+/// Structured classification of a tool-call message for rendering.
+/// Eliminates fragile string-matching in render.rs (is_diff/is_bash).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolKind {
+    /// edit_file / apply_edits / plan_edits — rendered as colored diff
+    Edit,
+    /// bash / run_command — rendered as "$ command" with larger line budget
+    Bash,
+    /// All other tools (read_file, grep, find_files, mcp_*, etc.)
+    Other,
+}
+
 #[derive(Debug, Clone)]
 pub struct AppMessage {
     pub role: AppMessageRole,
@@ -18,74 +30,58 @@ pub struct AppMessage {
     /// same chat line even when multiple tools are in flight. Set only on Tool-
     /// role messages; None for everything else.
     pub tool_id: Option<String>,
+    /// Structured tool name (e.g. "edit_file", "bash") extracted from the LSP
+    /// bus payload. Populated by bus_to_app_message / handle_bus_message when
+    /// the message is a Tool-role tool-call. None for non-tool messages.
+    pub tool_name: Option<String>,
+    /// Structured kind classification derived from tool_name at construction
+    /// time. Used by render.rs to pick rendering strategy without string-
+    /// matching on content. None for non-tool messages or when unknown.
+    pub tool_kind: Option<ToolKind>,
 }
 
 impl AppMessage {
     pub fn user(content: impl Into<String>) -> Self {
-        Self {
-            role: AppMessageRole::User,
-            content: content.into(),
-            tool_id: None,
-        }
+        Self { role: AppMessageRole::User, content: content.into(), tool_id: None, tool_name: None, tool_kind: None }
     }
 
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self {
-            role: AppMessageRole::Assistant,
-            content: content.into(),
-            tool_id: None,
-        }
+        Self { role: AppMessageRole::Assistant, content: content.into(), tool_id: None, tool_name: None, tool_kind: None }
     }
 
     pub fn thinking(content: impl Into<String>) -> Self {
-        Self {
-            role: AppMessageRole::Thinking,
-            content: content.into(),
-            tool_id: None,
-        }
+        Self { role: AppMessageRole::Thinking, content: content.into(), tool_id: None, tool_name: None, tool_kind: None }
     }
 
     /// Construct a Tool-role message tagged with `tool_id` for cross-message
     /// matching. The display content is built by the caller.
     pub fn tool(content: impl Into<String>, tool_id: Option<String>) -> Self {
-        Self {
-            role: AppMessageRole::Tool,
-            content: content.into(),
-            tool_id,
-        }
+        Self { role: AppMessageRole::Tool, content: content.into(), tool_id, tool_name: None, tool_kind: None }
+    }
+
+    /// Construct a Tool-role message with structured metadata for rendering.
+    /// `tool_name` is the LSP function name (e.g. "edit_file", "bash").
+    pub fn tool_with_meta(content: impl Into<String>, tool_id: Option<String>, tool_name: Option<&str>) -> Self {
+        let kind = tool_name.map(classify_tool);
+        Self { role: AppMessageRole::Tool, content: content.into(), tool_id, tool_name: tool_name.map(|s| s.to_string()), tool_kind: kind }
     }
 
     #[allow(dead_code)]
     pub fn tool_call(tool_name: &str, args: &str, result: &str) -> Self {
-        Self {
-            role: AppMessageRole::Tool,
-            content: format!("[{}] {} => {}", tool_name, args, result),
-            tool_id: None,
-        }
+        let kind = classify_tool(tool_name);
+        Self { role: AppMessageRole::Tool, content: format!("[{}] {} => {}", tool_name, args, result), tool_id: None, tool_name: Some(tool_name.to_string()), tool_kind: Some(kind) }
     }
 
     pub fn error(content: impl Into<String>) -> Self {
-        Self {
-            role: AppMessageRole::Error,
-            content: content.into(),
-            tool_id: None,
-        }
+        Self { role: AppMessageRole::Error, content: content.into(), tool_id: None, tool_name: None, tool_kind: None }
     }
 
     pub fn info(content: impl Into<String>) -> Self {
-        Self {
-            role: AppMessageRole::Info,
-            content: content.into(),
-            tool_id: None,
-        }
+        Self { role: AppMessageRole::Info, content: content.into(), tool_id: None, tool_name: None, tool_kind: None }
     }
 
     pub fn system(content: impl Into<String>) -> Self {
-        Self {
-            role: AppMessageRole::System,
-            content: content.into(),
-            tool_id: None,
-        }
+        Self { role: AppMessageRole::System, content: content.into(), tool_id: None, tool_name: None, tool_kind: None }
     }
 }
 
@@ -741,8 +737,18 @@ impl InputState {
     }
 }
 
+/// Classify a tool name into a ToolKind for rendering strategy.
+/// Used by bus_to_app_message and handle_bus_message to populate
+/// AppMessage.tool_kind, eliminating string-matching in render.rs.
+pub fn classify_tool(name: &str) -> ToolKind {
+    match name {
+        "edit_file" | "apply_edits" | "plan_edits" => ToolKind::Edit,
+        "bash" | "run_command" => ToolKind::Bash,
+        _ => ToolKind::Other,
+    }
+}
+
 /// Word-char predicate (byte-level). Alphanumeric (ASCII) only.
-/// Matches test expectations for `foo.bar baz` etc.
 fn is_word_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric()
 }
@@ -947,10 +953,22 @@ impl ChatState {
     }
 
     /// Replace the content of a Tool message at `index`, preserving its
-    /// tool_id.
+    /// tool_id and structured metadata.
     pub fn replace_tool(&mut self, index: usize, content: String) {
         if let Some(msg) = self.messages.get_mut(index) {
             msg.content = content;
+        }
+    }
+
+    /// Replace the full state of a Tool message at `index`, including
+    /// structured metadata. Used when streaming updates provide new tool_name.
+    pub fn replace_tool_meta(&mut self, index: usize, content: String, tool_name: Option<&str>) {
+        if let Some(msg) = self.messages.get_mut(index) {
+            msg.content = content;
+            if let Some(name) = tool_name {
+                msg.tool_name = Some(name.to_string());
+                msg.tool_kind = Some(classify_tool(name));
+            }
         }
     }
 

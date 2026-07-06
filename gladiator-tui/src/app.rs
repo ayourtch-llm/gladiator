@@ -798,12 +798,12 @@ impl App {
             // with the same id and replace it in place (progressive update).
             if let Some(ref tid) = tool_id {
                 if let Some(idx) = self.chat.find_tool_by_id(tid) {
-                    self.chat.replace_tool(idx, content);
+                    self.chat.replace_tool_meta(idx, content, if !name.is_empty() { Some(name) } else { None });
                     return;
                 }
             }
-            // New tool call — add a new Tool message tagged with the id.
-            self.chat.add_message(AppMessage::tool(content, tool_id));
+            // New tool call — add a new Tool message tagged with the id and meta.
+            self.chat.add_message(AppMessage::tool_with_meta(content, tool_id.clone(), if !name.is_empty() { Some(name) } else { None }));
             self.last_stream_type = None;
             return;
         }

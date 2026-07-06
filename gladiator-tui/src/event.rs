@@ -63,7 +63,7 @@ pub fn bus_to_app_message(msg: &Message) -> Option<AppMessage> {
                 } else {
                     "building...".to_string()
                 };
-                Some(AppMessage::tool(content, tool_id))
+                Some(AppMessage::tool_with_meta(content, tool_id, if !name.is_empty() { Some(name) } else { None }))
             }
             "LlmToolResult" => {
                 // LlmToolResult payload is a string of the form:
@@ -77,6 +77,8 @@ pub fn bus_to_app_message(msg: &Message) -> Option<AppMessage> {
                 role: AppMessageRole::Error,
                 content,
                 tool_id: None,
+                tool_name: None,
+                tool_kind: None,
             }),
             "Info" => {
                 // Support both legacy plain-text and structured JSON payloads.
