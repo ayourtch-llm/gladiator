@@ -975,8 +975,10 @@ fn subagent_frame_constructs() {
     let frame = gladiator_agent::SubagentFrame {
         saved_state: state,
         saved_system_message: "parent system".to_string(),
+        tool_call_id: "tc-1".to_string(),
     };
     assert_eq!(frame.saved_system_message, "parent system");
+    assert_eq!(frame.tool_call_id, "tc-1");
 }
 
 #[test]

@@ -17,6 +17,10 @@ pub struct SubagentFrame {
     pub saved_state: ConversationState,
     /// The parent agent's system message that was active before the push.
     pub saved_system_message: String,
+    /// tool_call_id of the call_subagent that pushed this frame. Used on pop
+    /// to resolve exactly this call — the batch may contain other (deferred)
+    /// call_subagent calls that must not be resolved by this pop.
+    pub tool_call_id: String,
 }
 
 /// Resolve a path against the agent working directory. Absolute paths and
@@ -352,6 +356,13 @@ impl AgentActor {
         // before taking any further action (dispatch or turn advancement).
         {
             let s = state.lock().await;
+            info!(
+                "Agent {}: advance_turn_if_resolved entry: pending={:?}, undispatched.len={}, depth={}",
+                self.index,
+                s.pending_tool_calls,
+                s.undispatched_tool_calls.len(),
+                s.subagent_depth,
+            );
             // If there are undispatched tool calls, dispatch the next batch
             // instead of advancing the turn. This resumes deferred tools after
             // a call_subagent completes, and after in-flight tools that were
@@ -472,6 +483,7 @@ impl AgentActor {
     async fn handle_internal_tool(
         &self,
         name: &str,
+        tool_call_id: &str,
         args: &serde_json::Value,
         state: &Arc<Mutex<ConversationState>>,
         subagent_stack: &Arc<Mutex<Vec<SubagentFrame>>>,
@@ -522,7 +534,7 @@ impl AgentActor {
             }
             "restart_from_file" => self.handle_restart_from_file(args, state).await,
             "call_subagent" => {
-                self.handle_call_subagent(args, &state, subagent_stack, bus)
+                self.handle_call_subagent(tool_call_id, args, &state, subagent_stack, bus)
                     .await
             }
             "set_context_reminder" => {
@@ -707,6 +719,7 @@ impl AgentActor {
     /// tool result — advance_turn_if_resolved will send the inner conversation.
     async fn handle_call_subagent(
         &self,
+        tool_call_id: &str,
         args: &serde_json::Value,
         state: &Arc<Mutex<ConversationState>>,
         subagent_stack: &Arc<Mutex<Vec<SubagentFrame>>>,
@@ -735,6 +748,7 @@ impl AgentActor {
                 SubagentFrame {
                     saved_state: (*s).clone(),
                     saved_system_message: self.system_message.clone(),
+                    tool_call_id: tool_call_id.to_string(),
                 }
             };
             stack.push(frame);
@@ -806,44 +820,35 @@ impl AgentActor {
         };
 
         // Restore parent state. The saved_state already contains the assistant
-        // message with tool_calls=[{id:"call-X", function:{name:"call_subagent"}}]
-        // and pending_tool_calls={"call-X"}. We need to find that id so we can
-        // add a matching tool result.
+        // message with this frame's call_subagent in tool_calls and its id in
+        // pending_tool_calls; the frame records that id so we resolve exactly
+        // this call (the batch may hold other, still-undispatched
+        // call_subagent calls that must stay unresolved).
+        let subagent_tc_id = frame.tool_call_id.clone();
         let depth_after;
-        let mut subagent_tc_id: Option<String> = None;
         {
             let mut s = state.lock().await;
             *s = frame.saved_state.clone();
             s.subagent_depth = s.subagent_depth.saturating_sub(1);
             depth_after = s.subagent_depth;
 
-            // Find the call_subagent's tool_call_id and stash it for the
-            // display message published after this block.
-            for msg in &s.messages {
-                if msg.get("role").and_then(|r| r.as_str()) == Some("assistant") {
-                    if let Some(tcs) = msg.get("tool_calls").and_then(|t| t.as_array()) {
-                        for tc in tcs {
-                            let name = tc["function"]["name"].as_str().unwrap_or("");
-                            if name == "call_subagent" {
-                                subagent_tc_id = Some(
-                                    tc["id"].as_str().unwrap_or("").to_string()
-                                );
-                            }
-                        }
-                    }
-                }
-            }
+            info!(
+                "Agent {}: pop_subagent restored: pending={:?}, undispatched.len={}, messages.len={}",
+                self.index,
+                s.pending_tool_calls,
+                s.undispatched_tool_calls.len(),
+                s.messages.len(),
+            );
 
-            match subagent_tc_id {
-                Some(ref id) => {
-                    s.add_tool_result(id, "call_subagent", &result_text, true);
-                    s.resolve_tool_call(id);
-                }
-                None => {
-                    warn!("Agent {}: pop_subagent could not find call_subagent tool_call_id in restored state — result will be lost",
-                        self.index);
-                }
-            }
+            s.add_tool_result(&subagent_tc_id, "call_subagent", &result_text, true);
+            s.resolve_tool_call(&subagent_tc_id);
+            info!(
+                "Agent {}: pop_subagent after resolve(cs_id={}): pending={:?}, undispatched.len={}",
+                self.index,
+                subagent_tc_id,
+                s.pending_tool_calls,
+                s.undispatched_tool_calls.len(),
+            );
 
             // Clear the active_system_message override since we're back to parent.
             s.active_system_message = None;
@@ -851,19 +856,18 @@ impl AgentActor {
 
         // Publish a display message so the TUI can coalesce the result into
         // the [tool] placeholder for call_subagent.
-        if let Some(id) = subagent_tc_id.as_ref() {
+        {
             let display = format!(
                 "  [tool_result] call_subagent({}) => {}",
-                id,
+                subagent_tc_id,
                 result_text.chars().take(500).collect::<String>()
             );
-            let depth_for_stamp = depth_after;
             let display_msg = Message::new(
                 &self.stream_output_topic,
                 &self.id(),
                 display,
             ).with_type("LlmToolResult");
-            let display_msg = self.stamp_depth_sync(display_msg, depth_for_stamp);
+            let display_msg = self.stamp_depth_sync(display_msg, depth_after);
             let _ = bus.publish(&self.id(), display_msg).await;
         }
 
@@ -1017,7 +1021,7 @@ impl AgentActor {
             let _ = bus.publish(&self.id(), tool_status).await;
 
             let outcome =
-                self.handle_internal_tool(&func_name, &args, &state, subagent_stack, bus)
+                self.handle_internal_tool(&func_name, &tool_call_id, &args, &state, subagent_stack, bus)
                     .await;
             let success = outcome.success;
             let display_snapshot = outcome.result_text.clone();
@@ -1205,6 +1209,17 @@ impl Actor for AgentActor {
         let mut tool_watchdog = tokio::time::interval(std::time::Duration::from_secs(10));
         // Wake-up check interval: every 5 seconds, scan for due wake-ups.
         let mut wake_up_timer = tokio::time::interval(std::time::Duration::from_secs(5));
+
+        // Monotonic counter + persistent seen-set for tool call IDs. Some LLM
+        // endpoints reuse the same tool_call id across batches (and even
+        // within a batch), which breaks pending_tool_calls tracking and the
+        // call_subagent id lookup in pop_subagent. We keep the model's id on
+        // first sight (so it gets echoed back in the tool result unchanged)
+        // and only reassign to `tc-{N}` when an id collides with one we've
+        // already seen.
+        let mut tc_counter: u64 = 0;
+        let mut seen_tc_ids: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         info!(
             "Agent actor {} listening on '{}' with {} tools, max_iterations={}",
@@ -1529,30 +1544,34 @@ impl Actor for AgentActor {
                                 _ => continue,
                             };
 
-                            // Some endpoints return the same tool_call id for
-                            // every tool in a batch. Deduplicate by suffixing
-                            // duplicates with __dupN so each tool call has a
-                            // unique id — otherwise resolve_tool_call fires
-                            // advance_turn_if_resolved prematurely (after the
-                            // first result), causing consecutive assistant
-                            // messages and 400 errors from the provider.
+                            // De-duplicate tool call IDs only on collision.
+                            // Some LLM endpoints reuse the same tool_call id
+                            // across batches (and within a batch) — that breaks
+                            // pending_tool_calls tracking and the call_subagent
+                            // id lookup in pop_subagent. We keep the model's id
+                            // on first sight so the tool result echoes it back
+                            // unchanged; on any repeat we reassign to `tc-{N}`.
                             {
-                                let mut seen = std::collections::HashSet::new();
-                                for (i, tc) in tool_calls.iter_mut().enumerate() {
-                                    let raw = tc["id"].as_str().unwrap_or("").to_string();
+                                for tc in tool_calls.iter_mut() {
+                                    let raw = tc["id"]
+                                        .as_str()
+                                        .unwrap_or("")
+                                        .to_string();
                                     let id = if raw.is_empty() {
-                                        format!("__idx_{}", i)
+                                        tc_counter += 1;
+                                        format!("tc-{}", tc_counter)
+                                    } else if seen_tc_ids.contains(&raw) {
+                                        tc_counter += 1;
+                                        format!("tc-{}", tc_counter)
                                     } else {
                                         raw
                                     };
-                                    let unique = if seen.contains(&id) {
-                                        format!("{}__dup{}", id, i)
-                                    } else {
-                                        id
-                                    };
-                                    seen.insert(unique.clone());
+                                    seen_tc_ids.insert(id.clone());
                                     if let Some(obj) = tc.as_object_mut() {
-                                        obj.insert("id".into(), serde_json::Value::String(unique));
+                                        obj.insert(
+                                            "id".into(),
+                                            serde_json::Value::String(id),
+                                        );
                                     }
                                 }
                             }
