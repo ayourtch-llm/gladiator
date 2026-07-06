@@ -472,8 +472,7 @@ impl RustAnalyzerClient {
                 "publishDiagnostics": { "relatedInformation": true },
                 "codeAction": {
                     "dynamicRegistration": false,
-                    "codeActionLiteralsSupport": true,
-                    "dataSupport": false
+                    "codeActionLiteralSupport": { "codeActionKind": { "valueSet": ["refactor.extract", "refactor.inline", "source.organizeImports"] } }
                 },
                 "typeHierarchy": { "dynamicRegistration": false }
             },
@@ -802,7 +801,7 @@ impl RustAnalyzerClient {
         let params = create_code_action_params(
             file_path,
             range.clone(),
-            &["refactor.extract.function"],
+            &["refactor.extract"],
         );
 
         let response = self.send_request_retry("textDocument/codeAction", params).await?;
