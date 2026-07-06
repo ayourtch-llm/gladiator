@@ -1236,130 +1236,140 @@ pub async fn run_app(
             }
         }
 
-        // Check for key/paste events (non-blocking with timeout)
-        if event::poll(tick).unwrap_or(false) {
-            if let Ok(ev) = event::read() {
-                match ev {
-                    CrosstermEvent::Key(key) => {
-                        if key.code == KeyCode::Esc {
-                            let now = Instant::now();
-                            let should_interrupt = last_esc_time
-                                .map(|t| now.duration_since(t) < Duration::from_millis(500))
-                                .unwrap_or(false);
-                            if should_interrupt {
-                                let interrupt_payload = serde_json::json!({
-                                    "type": "interrupt",
-                                    "reason": "user_stopped"
-                                });
-                                let msg = Message::new(
-                                    &topics.user_control,
-                                    "gladiator-tui",
-                                    interrupt_payload,
-                                );
-                                let _ = bus.publish("gladiator-tui", msg).await;
-                                app.chat_mut().add_message(AppMessage::system("Stopping inference..."));
-                                app.scroll_mut().scroll_to_bottom();
-                                app.stop_spinner();
-                                app.set_status("Interrupt sent");
-                                last_esc_time = None;
-                            } else {
-                                last_esc_time = Some(now);
-                            }
+        // Check for key/paste events. First poll uses tick (50ms) to wait
+        // for input; subsequent drains use zero timeout to batch all
+        // immediately-available events into one render cycle.
+        let mut first_poll = true;
+        loop {
+            let timeout = if first_poll { tick } else { Duration::ZERO };
+            first_poll = false;
+            if !event::poll(timeout).unwrap_or(false) {
+                break;
+            }
+            let ev = match event::read() {
+                Ok(ev) => ev,
+                Err(_) => break,
+            };
+            match ev {
+                CrosstermEvent::Key(key) => {
+                    if key.code == KeyCode::Esc {
+                        let now = Instant::now();
+                        let should_interrupt = last_esc_time
+                            .map(|t| now.duration_since(t) < Duration::from_millis(500))
+                            .unwrap_or(false);
+                        if should_interrupt {
+                            let interrupt_payload = serde_json::json!({
+                                "type": "interrupt",
+                                "reason": "user_stopped"
+                            });
+                            let msg = Message::new(
+                                &topics.user_control,
+                                "gladiator-tui",
+                                interrupt_payload,
+                            );
+                            let _ = bus.publish("gladiator-tui", msg).await;
+                            app.chat_mut().add_message(AppMessage::system("Stopping inference..."));
+                            app.scroll_mut().scroll_to_bottom();
+                            app.stop_spinner();
+                            app.set_status("Interrupt sent");
+                            last_esc_time = None;
                         } else {
-                            if let Some(text) = app.handle_key(key) {
-                                if let Some(cmd) = parse_tui_command(&text) {
-                                    match cmd {
-                                        TuiCommand::Save(filename) => {
-                                            let msg = Message::new(
-                                                &topics.persistence_command,
-                                                "gladiator-tui",
-                                                serde_json::json!({"action": "save", "filename": filename, "agent_id": "gladiator-agent-0"}),
-                                            );
-                                            let _ = bus.publish("gladiator-tui", msg).await;
-                                            app.chat_mut().add_message(AppMessage::system(&format!("Saving to {}...", filename)));
-                                            app.scroll_mut().scroll_to_bottom();
-                                        }
-                                        TuiCommand::Load(filename) => {
-                                            let msg = Message::new(
-                                                &topics.persistence_command,
-                                                "gladiator-tui",
-                                                serde_json::json!({"action": "load", "filename": filename, "agent_id": "gladiator-agent-0"}),
-                                            );
-                                            let _ = bus.publish("gladiator-tui", msg).await;
-                                            app.chat_mut().add_message(AppMessage::system(&format!("Loading from {}...", filename)));
-                                            app.scroll_mut().scroll_to_bottom();
-                                        }
-                                        TuiCommand::Fixme(phrase) => {
-                                            match fixme_store.add(&phrase) {
-                                                Ok(entry) => {
-                                                    app.chat_mut().add_message(AppMessage::system(
-                                                        &format!("Added fixme: {} (id: {})", entry.phrase, entry.id),
-                                                    ));
-                                                }
-                                                Err(e) => {
-                                                    app.chat_mut().add_message(AppMessage::error(
-                                                        &format!("Failed to add fixme: {}", e),
-                                                    ));
-                                                }
-                                            }
-                                            app.scroll_mut().scroll_to_bottom();
-                                        }
-                                        TuiCommand::Debug(enabled) => {
-                                            debug_flag.store(enabled, Ordering::Relaxed);
-                                            if enabled {
-                                                app.chat_mut().add_message(AppMessage::system(
-                                                    "Debug mode enabled — tracing output will appear in chat",
-                                                ));
-                                                app.set_status("Debug: ON");
-                                            } else {
-                                                app.chat_mut().add_message(AppMessage::system(
-                                                    "Debug mode disabled",
-                                                ));
-                                                app.set_status("Debug: OFF");
-                                            }
-                                            app.scroll_mut().scroll_to_bottom();
-                                        }
-                                        TuiCommand::Sandbox(enabled) => {
-                                            sandbox_toggle.store(enabled, Ordering::Relaxed);
-                                            if enabled {
-                                                app.chat_mut().add_message(AppMessage::system(
-                                                    "Sandbox enabled — bash commands run under sandbox-exec",
-                                                ));
-                                                app.set_status("Sandbox: ON");
-                                            } else {
-                                                app.chat_mut().add_message(AppMessage::system(
-                                                    "Sandbox disabled — bash commands run without sandboxing",
-                                                ));
-                                                app.set_status("Sandbox: OFF");
-                                            }
-                                            app.scroll_mut().scroll_to_bottom();
-                                        }
+                            last_esc_time = Some(now);
+                        }
+                    } else {
+                        if let Some(text) = app.handle_key(key) {
+                            if let Some(cmd) = parse_tui_command(&text) {
+                                match cmd {
+                                    TuiCommand::Save(filename) => {
+                                        let msg = Message::new(
+                                            &topics.persistence_command,
+                                            "gladiator-tui",
+                                            serde_json::json!({"action": "save", "filename": filename, "agent_id": "gladiator-agent-0"}),
+                                        );
+                                        let _ = bus.publish("gladiator-tui", msg).await;
+                                        app.chat_mut().add_message(AppMessage::system(&format!("Saving to {}...", filename)));
+                                        app.scroll_mut().scroll_to_bottom();
                                     }
-                                } else {
-                                    let _ = user_input_tx.send(text);
+                                    TuiCommand::Load(filename) => {
+                                        let msg = Message::new(
+                                            &topics.persistence_command,
+                                            "gladiator-tui",
+                                            serde_json::json!({"action": "load", "filename": filename, "agent_id": "gladiator-agent-0"}),
+                                        );
+                                        let _ = bus.publish("gladiator-tui", msg).await;
+                                        app.chat_mut().add_message(AppMessage::system(&format!("Loading from {}...", filename)));
+                                        app.scroll_mut().scroll_to_bottom();
+                                    }
+                                    TuiCommand::Fixme(phrase) => {
+                                        match fixme_store.add(&phrase) {
+                                            Ok(entry) => {
+                                                app.chat_mut().add_message(AppMessage::system(
+                                                    &format!("Added fixme: {} (id: {})", entry.phrase, entry.id),
+                                                ));
+                                            }
+                                            Err(e) => {
+                                                app.chat_mut().add_message(AppMessage::error(
+                                                    &format!("Failed to add fixme: {}", e),
+                                                ));
+                                            }
+                                        }
+                                        app.scroll_mut().scroll_to_bottom();
+                                    }
+                                    TuiCommand::Debug(enabled) => {
+                                        debug_flag.store(enabled, Ordering::Relaxed);
+                                        if enabled {
+                                            app.chat_mut().add_message(AppMessage::system(
+                                                "Debug mode enabled — tracing output will appear in chat",
+                                            ));
+                                            app.set_status("Debug: ON");
+                                        } else {
+                                            app.chat_mut().add_message(AppMessage::system(
+                                                "Debug mode disabled",
+                                            ));
+                                            app.set_status("Debug: OFF");
+                                        }
+                                        app.scroll_mut().scroll_to_bottom();
+                                    }
+                                    TuiCommand::Sandbox(enabled) => {
+                                        sandbox_toggle.store(enabled, Ordering::Relaxed);
+                                        if enabled {
+                                            app.chat_mut().add_message(AppMessage::system(
+                                                "Sandbox enabled — bash commands run under sandbox-exec",
+                                            ));
+                                            app.set_status("Sandbox: ON");
+                                        } else {
+                                            app.chat_mut().add_message(AppMessage::system(
+                                                "Sandbox disabled — bash commands run without sandboxing",
+                                            ));
+                                            app.set_status("Sandbox: OFF");
+                                        }
+                                        app.scroll_mut().scroll_to_bottom();
+                                    }
                                 }
-                            } else if app.take_retract_request() {
-                                // Up arrow with pending messages: ask the agent
-                                // to drain its own pending list and send back a
-                                // RetrievedPending message that populates the editor.
-                                let msg = Message::new(
-                                    &topics.agent_state_control,
-                                    "gladiator-tui",
-                                    serde_json::json!({"type": "retrieve_pending", "agent_id": "gladiator-agent-0"}),
-                                );
-                                let _ = bus.publish("gladiator-tui", msg).await;
+                            } else {
+                                let _ = user_input_tx.send(text);
                             }
+                        } else if app.take_retract_request() {
+                            // Up arrow with pending messages: ask the agent
+                            // to drain its own pending list and send back a
+                            // RetrievedPending message that populates the editor.
+                            let msg = Message::new(
+                                &topics.agent_state_control,
+                                "gladiator-tui",
+                                serde_json::json!({"type": "retrieve_pending", "agent_id": "gladiator-agent-0"}),
+                            );
+                            let _ = bus.publish("gladiator-tui", msg).await;
                         }
                     }
-                    CrosstermEvent::Paste(data) => {
-                        // Normalize line endings: \r\n → \n, \r → \n
-                        let normalized = data.replace("\r\n", "\n").replace("\r", "\n");
-                        app.input_mut().insert_str(&normalized);
-                    }
-                    _ => {}
                 }
+                CrosstermEvent::Paste(data) => {
+                    // Normalize line endings: \r\n → \n, \r → \n
+                    let normalized = data.replace("\r\n", "\n").replace("\r", "\n");
+                    app.input_mut().insert_str(&normalized);
+                }
+                _ => {}
             }
-        }
+            } // end event-drain loop
 
         if app.should_quit() {
             break;
