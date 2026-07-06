@@ -322,16 +322,25 @@ impl Renderer {
                         text_color
                     };
 
-                    let avail = width.max(1);
+                    let avail = if i == 0 {
+                        width.saturating_sub(prefix_len).max(1)
+                    } else {
+                        width.saturating_sub(indent_str.chars().count()).max(1)
+                    };
                     let chars: Vec<char> = raw_line.chars().collect();
                     let start = h_offset.min(chars.len());
                     let end = (start + avail).min(chars.len());
                     let text: String = chars[start..end].iter().collect();
 
-                    lines.push(Line::from(vec![Span::styled(
+                    let mut spans: Vec<Span> = Vec::new();
+                    if i > 0 && !indent_str.is_empty() {
+                        spans.push(Span::styled(indent_str.clone(), Style::default().fg(self.theme.color_text_muted())));
+                    }
+                    spans.push(Span::styled(
                         text,
                         Style::default().fg(line_color),
-                    )]));
+                    ));
+                    lines.push(Line::from(spans));
                 }
 
                 if lines.is_empty() {
@@ -416,7 +425,7 @@ impl Renderer {
                 let avail = if i == 0 {
                     width.saturating_sub(prefix_len).max(1)
                 } else {
-                    width.max(1)
+                    width.saturating_sub(indent_str.chars().count()).max(1)
                 };
                 let start = h_offset.min(chars.len());
                 let end = (start + avail).min(chars.len());
@@ -425,6 +434,8 @@ impl Renderer {
                 let mut spans: Vec<Span> = Vec::new();
                 if i == 0 && !prefix_str.is_empty() {
                     spans.push(Span::styled(prefix_str.clone(), Style::default().fg(prefix_color)));
+                } else if i > 0 && !indent_str.is_empty() {
+                    spans.push(Span::styled(indent_str.clone(), Style::default().fg(self.theme.color_text_muted())));
                 }
                 spans.push(Span::styled(text, Style::default().fg(text_color)));
                 lines.push(Line::from(spans));
@@ -435,6 +446,9 @@ impl Renderer {
                 let hidden = all_lines.len() - max_lines;
                 let hint = format!("… {} more lines ({} total) — scroll right/up not available; see full output in logs", hidden, all_lines.len());
                 let mut spans: Vec<Span> = Vec::new();
+                if !indent_str.is_empty() {
+                    spans.push(Span::styled(indent_str.clone(), Style::default().fg(self.theme.color_text_muted())));
+                }
                 spans.push(Span::styled(
                     hint,
                     Style::default().fg(self.theme.color_text_muted()).add_modifier(Modifier::DIM),
@@ -452,16 +466,23 @@ impl Renderer {
         }
 
         // Non-tool messages: hard-wrap preserving whitespace and newlines
+        // When depth > 0, every continuation line also gets the indent prefix
+        // so the entire message block is visually indented, not just line 1.
+        let indent_for_cont = indent_str.clone();
         let first_line_width = width.saturating_sub(prefix_len).max(1);
-        let cont_width = width.max(1);
+        let cont_width = width.saturating_sub(indent_for_cont.chars().count()).max(1);
 
         let wrapped = wrap_text(&msg.content, first_line_width, cont_width);
         let mut lines: Vec<Line> = Vec::new();
 
         for (i, text) in wrapped.into_iter().enumerate() {
             let mut spans: Vec<Span> = Vec::new();
-            if i == 0 && !prefix_str.is_empty() {
-                spans.push(Span::styled(prefix_str.clone(), Style::default().fg(prefix_color)));
+            if i == 0 {
+                if !prefix_str.is_empty() {
+                    spans.push(Span::styled(prefix_str.clone(), Style::default().fg(prefix_color)));
+                }
+            } else if !indent_for_cont.is_empty() {
+                spans.push(Span::styled(indent_for_cont.clone(), Style::default().fg(self.theme.color_text_muted())));
             }
             spans.push(Span::styled(text, Style::default().fg(text_color)));
             lines.push(Line::from(spans));

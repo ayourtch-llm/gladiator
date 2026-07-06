@@ -1102,16 +1102,55 @@ impl Actor for AgentActor {
                                 // Subagent completion detection: when inner
                                 // conversation produces a text-only response (no pending tool calls) and we're at depth > 0, pop back to parent.
                                 if !subagent_stack.lock().await.is_empty() {
-                                    let should_pop = {
-                                        let s = state.lock().await;
-                                        s.subagent_depth > 0 && !s.inference_in_flight && s.all_tool_calls_resolved()
+                                    // Before popping, check if the user sent
+                                    // messages to steer the subagent. If so,
+                                    // drain them into the subagent's
+                                    // conversation and continue for another
+                                    // turn instead of popping.
+                                    let pending = {
+                                        let mut s = state.lock().await;
+                                        s.drain_pending_messages()
                                     };
-                                    if should_pop {
-                                        self.pop_subagent(&state, &subagent_stack, bus,
-                                            output_for_pop).await;
+                                    if !pending.is_empty() {
+                                        // Inject pending messages into the
+                                        // subagent and send next LLM turn.
+                                        let depth = {
+                                            let mut s = state.lock().await;
+                                            for m in &pending {
+                                                s.add_user_message(m.clone());
+                                            }
+                                            let displayed = Message::new(
+                                                &self.stream_output_topic,
+                                                &self.id(),
+                                                pending.last().unwrap().clone(),
+                                            ).with_type("UserMessageDisplayed");
+                                            drop(s);
+                                            let _ = bus.publish(&self.id(), self.stamp_depth(displayed, &state).await).await;
+                                            state.lock().await.subagent_depth
+                                        };
+                                        info!("Agent {}: subagent at depth {} received {} pending user message(s), continuing turn",
+                                              self.index, depth, pending.len());
+                                        let messages = {
+                                            let s = state.lock().await;
+                                            s.build_messages_with_system(&self.system_message)
+                                        };
+                                        {
+                                            let mut s = state.lock().await;
+                                            s.inference_in_flight = true;
+                                        }
+                                        let _ = self.send_conversation(bus, &messages).await;
                                     } else {
-                                        // Cross-turn loop detection (tie-breaker injection)
-                                        let _ = self.maybe_break_cross_turn_loop(bus, &state).await;
+                                        let should_pop = {
+                                            let s = state.lock().await;
+                                            s.subagent_depth > 0 && !s.inference_in_flight && s.all_tool_calls_resolved()
+                                        };
+                                        if should_pop {
+                                            self.pop_subagent(&state, &subagent_stack, bus,
+                                                output_for_pop).await;
+                                        } else {
+                                            // Cross-turn loop detection (tie-breaker injection)
+                                            let _ = self.maybe_break_cross_turn_loop(bus, &state).await;
+                                        }
                                     }
                                 } else {
                                     // Cross-turn loop detection (tie-breaker injection)
