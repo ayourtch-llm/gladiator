@@ -17,7 +17,9 @@ fn find_crate_root() -> String {
     cwd.join("mcp-rlsp").display().to_string()
 }
 
+/// Spawns rust-analyzer and waits 10s for indexing — slow, run separately.
 #[tokio::test]
+#[ignore]
 async fn lsp_find_definition_with_wait() {
     let mut client = RustAnalyzerClient::new();
     client.start().await.expect("RA should start");
@@ -34,7 +36,9 @@ async fn lsp_find_definition_with_wait() {
     eprintln!("find_definition -> {:?}", result);
 }
 
+/// Spawns rust-analyzer and waits 10s for indexing — slow, run separately.
 #[tokio::test]
+#[ignore]
 async fn lsp_organize_imports_with_wait() {
     let mut client = RustAnalyzerClient::new();
     client.start().await.expect("RA should start");
@@ -61,7 +65,9 @@ async fn lsp_organize_imports_with_wait() {
     let _ = std::fs::remove_file(&test_file);
 }
 
+/// Spawns rust-analyzer and waits 30s for indexing — very slow, run separately.
 #[tokio::test]
+#[ignore]
 async fn lsp_workspace_symbols_long_wait() {
     eprintln!("CWD at test time: {:?}", std::env::current_dir());
     let mut client = RustAnalyzerClient::new();

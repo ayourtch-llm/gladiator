@@ -133,6 +133,19 @@ impl InputState {
         }
     }
 
+    /// Create an InputState with no persisted history. Used by unit tests
+    /// to avoid interference from the shared tmp/history.json file.
+    pub fn new_for_test() -> Self {
+        Self {
+            buffer: String::new(),
+            cursor: 0,
+            history: Vec::new(),
+            history_index: None,
+            kill_ring: Vec::new(),
+            last_op_was_kill: false,
+        }
+    }
+
     pub fn buffer(&self) -> &str {
         &self.buffer
     }

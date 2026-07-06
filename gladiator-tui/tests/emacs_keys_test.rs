@@ -20,7 +20,7 @@ use gladiator_tui::state::InputState;
 
 #[test]
 fn emacs_forward_word_basic() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("hello world");
     input.cursor_line_start(); // cursor at 0
     input.cursor_word_forward();
@@ -29,7 +29,7 @@ fn emacs_forward_word_basic() {
 
 #[test]
 fn emacs_forward_word_skips_whitespace() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("hello world");
     input.cursor_line_start(); // cursor at 0
     input.cursor_word_forward(); // -> 5
@@ -39,7 +39,7 @@ fn emacs_forward_word_skips_whitespace() {
 
 #[test]
 fn emacs_forward_word_from_middle() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("hello world");
     // cursor at 11 -> move back to 1 (inside "hello")
     for _ in 0..10 {
@@ -52,7 +52,7 @@ fn emacs_forward_word_from_middle() {
 
 #[test]
 fn emacs_forward_word_punctuation() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("foo.bar baz");
     input.cursor_line_start(); // cursor at 0
     input.cursor_word_forward(); // "foo" is word -> 3
@@ -63,7 +63,7 @@ fn emacs_forward_word_punctuation() {
 
 #[test]
 fn emacs_backward_word_basic() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("hello world");
     // cursor at 11
     input.cursor_word_backward();
@@ -72,7 +72,7 @@ fn emacs_backward_word_basic() {
 
 #[test]
 fn emacs_backward_word_twice() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("hello world");
     input.cursor_word_backward(); // -> 6
     input.cursor_word_backward(); // -> 0
@@ -81,7 +81,7 @@ fn emacs_backward_word_twice() {
 
 #[test]
 fn emacs_backward_word_into_whitespace() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("hello world");
     // cursor at 6 (start of "world")
     for _ in 0..5 {
@@ -96,7 +96,7 @@ fn emacs_backward_word_into_whitespace() {
 
 #[test]
 fn emacs_delete_char_forward() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("abc");
     input.cursor_left(); // cursor at 2 (before 'c')
     input.delete_char_forward(); // delete 'c'
@@ -106,7 +106,7 @@ fn emacs_delete_char_forward() {
 
 #[test]
 fn emacs_delete_char_forward_at_end() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("abc");
     // cursor at 3 (end)
     input.delete_char_forward(); // nothing to delete
@@ -116,7 +116,7 @@ fn emacs_delete_char_forward_at_end() {
 
 #[test]
 fn emacs_delete_char_forward_unicode() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("héllo");
     // "héllo" bytes: h(0) é(1-2) l(3) l(4) o(5), len 6. cursor at end (6).
     input.cursor_left(); // 5
@@ -131,7 +131,7 @@ fn emacs_delete_char_forward_unicode() {
 
 #[test]
 fn emacs_kill_to_end_of_line() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("hello world");
     input.cursor_line_start(); // cursor at 0
     input.cursor_word_forward(); // cursor at 5
@@ -143,7 +143,7 @@ fn emacs_kill_to_end_of_line() {
 
 #[test]
 fn emacs_kill_to_end_of_line_nothing_after() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("hello");
     input.kill_to_end_of_line(); // cursor at 5, nothing after
     assert_eq!(input.buffer(), "hello");
@@ -153,7 +153,7 @@ fn emacs_kill_to_end_of_line_nothing_after() {
 
 #[test]
 fn emacs_kill_to_end_of_line_stops_at_newline() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("ab\ncd");
     // cursor at 5 -> move to 1
     for _ in 0..4 {
@@ -168,7 +168,7 @@ fn emacs_kill_to_end_of_line_stops_at_newline() {
 
 #[test]
 fn emacs_kill_to_end_of_line_multiline() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("line1\nline2");
     // cursor at 11 -> move to start of line2 (6)
     input.cursor_line_start();
@@ -183,7 +183,7 @@ fn emacs_kill_to_end_of_line_multiline() {
 
 #[test]
 fn emacs_kill_to_end_of_line_join_multiline() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("line1\nline2");
     // cursor at 11 -> move left to end of "line1" (pos 5, before '\n')
     for _ in 0..6 {
@@ -199,7 +199,7 @@ fn emacs_kill_to_end_of_line_join_multiline() {
 
 #[test]
 fn emacs_kill_to_start_of_line() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("hello world");
     input.cursor_line_start(); // cursor at 0
     input.cursor_word_forward(); // cursor at 5
@@ -211,7 +211,7 @@ fn emacs_kill_to_start_of_line() {
 
 #[test]
 fn emacs_kill_to_start_of_line_multiline() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("line1\nline2");
     // cursor at 11 -> move to 9 (inside "line2", after "lin")
     for _ in 0..2 {
@@ -226,7 +226,7 @@ fn emacs_kill_to_start_of_line_multiline() {
 
 #[test]
 fn emacs_kill_to_start_of_line_at_line_start() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("hello");
     input.cursor_line_start(); // cursor 0
     input.kill_to_start_of_line(); // nothing to kill
@@ -239,7 +239,7 @@ fn emacs_kill_to_start_of_line_at_line_start() {
 
 #[test]
 fn emacs_kill_word_forward() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("hello world foo");
     input.cursor_line_start(); // cursor at 0
     input.cursor_word_forward(); // cursor at 5
@@ -251,7 +251,7 @@ fn emacs_kill_word_forward() {
 
 #[test]
 fn emacs_kill_word_forward_at_end() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("hello");
     input.kill_word_forward(); // cursor 5, no word forward
     assert_eq!(input.buffer(), "hello");
@@ -263,7 +263,7 @@ fn emacs_kill_word_forward_at_end() {
 
 #[test]
 fn emacs_kill_word_backward() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("hello world");
     // cursor at 11
     input.kill_word_backward(); // kill "world"
@@ -274,7 +274,7 @@ fn emacs_kill_word_backward() {
 
 #[test]
 fn emacs_kill_word_backward_across_whitespace() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("hello world");
     // cursor at 6 (start of "world")
     for _ in 0..5 {
@@ -289,7 +289,7 @@ fn emacs_kill_word_backward_across_whitespace() {
 
 #[test]
 fn emacs_kill_word_backward_at_start() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("hello");
     input.kill_word_backward(); // cursor 5, word_backward_target=0, kill "hello"
     assert_eq!(input.buffer(), "");
@@ -301,7 +301,7 @@ fn emacs_kill_word_backward_at_start() {
 
 #[test]
 fn emacs_yank_after_kill_to_end() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("hello world");
     input.cursor_line_start(); // cursor at 0
     input.cursor_word_forward(); // 5
@@ -314,7 +314,7 @@ fn emacs_yank_after_kill_to_end() {
 
 #[test]
 fn emacs_yank_empty_kill_ring() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("hello");
     input.yank(); // nothing to yank
     assert_eq!(input.buffer(), "hello");
@@ -323,7 +323,7 @@ fn emacs_yank_empty_kill_ring() {
 
 #[test]
 fn emacs_yank_most_recent_kill() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("abc def ghi");
     // cursor at 11 -> move to 7 (space before "ghi")
     for _ in 0..4 {
@@ -347,7 +347,7 @@ fn emacs_yank_most_recent_kill() {
 
 #[test]
 fn emacs_consecutive_kills_concatenate_forward() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("hello world foo");
     input.cursor_line_start(); // cursor at 0
     input.cursor_word_forward(); // 5
@@ -360,7 +360,7 @@ fn emacs_consecutive_kills_concatenate_forward() {
 
 #[test]
 fn emacs_consecutive_kills_concatenate_backward() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("hello world");
     // cursor at 11. Two backward kills should prepend.
     input.kill_word_backward(); // "world" (kill ring ["world"])
@@ -373,7 +373,7 @@ fn emacs_consecutive_kills_concatenate_backward() {
 
 #[test]
 fn emacs_yank_after_consecutive_kills() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("hello world foo");
     input.cursor_line_start(); // cursor at 0
     input.cursor_word_forward(); // 5
@@ -386,7 +386,7 @@ fn emacs_yank_after_consecutive_kills() {
 
 #[test]
 fn emacs_non_kill_breaks_concatenation() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("hello world");
     input.cursor_line_start(); // cursor at 0
     input.cursor_word_forward(); // 5
@@ -403,7 +403,7 @@ fn emacs_non_kill_breaks_concatenation() {
 
 #[test]
 fn emacs_history_beginning() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("first");
     let _ = input.submit();
     input.insert_str("second");
@@ -417,7 +417,7 @@ fn emacs_history_beginning() {
 
 #[test]
 fn emacs_history_end() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("first");
     let _ = input.submit();
     input.insert_str("second");
@@ -430,7 +430,7 @@ fn emacs_history_end() {
 
 #[test]
 fn emacs_history_beginning_empty() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.history_beginning(); // no history
     assert_eq!(input.buffer(), "");
     assert_eq!(input.cursor(), 0);

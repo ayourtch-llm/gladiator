@@ -41,14 +41,14 @@ fn theme_has_border_colors() {
 
 #[test]
 fn input_state_new_empty() {
-    let input = InputState::new();
+    let input = InputState::new_for_test();
     assert_eq!(input.buffer(), "");
     assert_eq!(input.cursor(), 0);
 }
 
 #[test]
 fn input_state_type_chars() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_char('h');
     input.insert_char('i');
     assert_eq!(input.buffer(), "hi");
@@ -57,7 +57,7 @@ fn input_state_type_chars() {
 
 #[test]
 fn input_state_backspace() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("hello");
     input.backspace();
     assert_eq!(input.buffer(), "hell");
@@ -66,7 +66,7 @@ fn input_state_backspace() {
 
 #[test]
 fn input_state_backspace_empty() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.backspace();
     assert_eq!(input.buffer(), "");
     assert_eq!(input.cursor(), 0);
@@ -74,7 +74,7 @@ fn input_state_backspace_empty() {
 
 #[test]
 fn input_state_cursor_left_right() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("abc");
     assert_eq!(input.cursor(), 3);
     input.cursor_left();
@@ -91,7 +91,7 @@ fn input_state_cursor_left_right() {
 
 #[test]
 fn input_state_insert_at_cursor() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("ac");
     input.cursor_left();
     // cursor at 1, insert 'b' -> "abc"
@@ -102,7 +102,7 @@ fn input_state_insert_at_cursor() {
 
 #[test]
 fn input_state_clear() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("hello");
     input.clear();
     assert_eq!(input.buffer(), "");
@@ -111,7 +111,7 @@ fn input_state_clear() {
 
 #[test]
 fn input_state_submit() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("hello world");
     let text = input.submit();
     assert_eq!(text, "hello world");
@@ -121,7 +121,7 @@ fn input_state_submit() {
 
 #[test]
 fn input_state_insert_newline() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("line1");
     input.insert_newline();
     input.insert_str("line2");
@@ -131,7 +131,7 @@ fn input_state_insert_newline() {
 
 #[test]
 fn input_state_multi_line_cursor_left_right() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("ab\ncd");
     // cursor at end (5)
     assert_eq!(input.cursor(), 5);
@@ -163,7 +163,7 @@ fn input_state_multi_line_cursor_left_right() {
 
 #[test]
 fn input_state_multi_line_backspace_across_newline() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("line1\nline2");
     // cursor at end
     input.cursor_left(); // before '2'
@@ -180,7 +180,7 @@ fn input_state_multi_line_backspace_across_newline() {
 
 #[test]
 fn input_state_history_basic() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("first command");
     let _ = input.submit();
     input.insert_str("second command");
@@ -192,7 +192,7 @@ fn input_state_history_basic() {
 
 #[test]
 fn input_state_history_prev_next() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("cmd1");
     let _ = input.submit();
     input.insert_str("cmd2");
@@ -219,7 +219,7 @@ fn input_state_history_prev_next() {
 
 #[test]
 fn input_state_history_prev_empty() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     // No history yet, pressing Up should do nothing
     input.history_prev();
     assert_eq!(input.buffer(), "");
@@ -228,7 +228,7 @@ fn input_state_history_prev_empty() {
 
 #[test]
 fn input_state_history_prev_then_submit() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("cmd1");
     let _ = input.submit();
     input.insert_str("cmd2");
@@ -248,7 +248,7 @@ fn input_state_history_prev_then_submit() {
 
 #[test]
 fn input_state_history_no_duplicates_consecutive() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("cmd");
     let _ = input.submit();
     // Submit same command again
@@ -260,7 +260,7 @@ fn input_state_history_no_duplicates_consecutive() {
 
 #[test]
 fn input_state_history_reset_on_submit() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("cmd1");
     let _ = input.submit();
     input.insert_str("cmd2");
@@ -283,7 +283,7 @@ fn input_state_history_reset_on_submit() {
 
 #[test]
 fn input_state_insert_str_single_line() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("hello world");
     assert_eq!(input.buffer(), "hello world");
     assert_eq!(input.cursor(), 11);
@@ -291,7 +291,7 @@ fn input_state_insert_str_single_line() {
 
 #[test]
 fn input_state_insert_str_multi_line_paste() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     // Simulate pasting "line1\nline2\nline3"
     input.insert_str("line1\nline2\nline3");
     assert_eq!(input.buffer(), "line1\nline2\nline3");
@@ -300,7 +300,7 @@ fn input_state_insert_str_multi_line_paste() {
 
 #[test]
 fn input_state_insert_str_at_cursor_position() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("ac");
     input.cursor_left(); // cursor at 1
     input.insert_str("bd"); // insert "bd" at cursor
@@ -310,7 +310,7 @@ fn input_state_insert_str_at_cursor_position() {
 
 #[test]
 fn input_state_insert_str_crlf_normalized() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     // Simulate paste with \r\n line endings — insert_str inserts as-is
     // (normalization happens in the event handler, not InputState)
     input.insert_str("line1\r\nline2");
@@ -320,7 +320,7 @@ fn input_state_insert_str_crlf_normalized() {
 
 #[test]
 fn input_state_paste_then_continue_typing() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("hello\n");
     input.insert_char('w');
     input.insert_char('o');
@@ -335,7 +335,7 @@ fn input_state_paste_then_continue_typing() {
 
 #[test]
 fn input_state_set_buffer_loads_text() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.set_buffer("retracted text");
     assert_eq!(input.buffer(), "retracted text");
     assert_eq!(input.cursor(), "retracted text".len());
@@ -343,7 +343,7 @@ fn input_state_set_buffer_loads_text() {
 
 #[test]
 fn input_state_set_buffer_multiline() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_char('x');
     input.set_buffer("line1\nline2");
     assert_eq!(input.buffer(), "line1\nline2");
@@ -353,7 +353,7 @@ fn input_state_set_buffer_multiline() {
 
 #[test]
 fn input_state_set_buffer_clears_history_index() {
-    let mut input = InputState::new();
+    let mut input = InputState::new_for_test();
     input.insert_str("first");
     let _ = input.submit(); // pushes to history, clears buffer
     input.history_prev();   // loads "first" into buffer, sets history_index
@@ -615,8 +615,9 @@ fn event_llm_tool_call_to_tool() {
     .with_type("LlmToolCall");
     let app_msg = bus_to_app_message(&msg).unwrap();
     assert_eq!(app_msg.role, AppMessageRole::Tool);
-    assert!(app_msg.content.contains("bash"));
-    assert!(app_msg.content.contains("ls -la"));
+    // bash tool calls are rendered as "$ command" via render_tool_call
+    assert!(app_msg.content.contains("$ ls -la"));
+    assert_eq!(app_msg.tool_name, Some("bash".to_string()));
 }
 
 #[test]
