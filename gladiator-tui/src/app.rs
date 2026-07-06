@@ -1,4 +1,4 @@
-use crate::commands::{parse_tui_command, TuiCommand};
+use crate::commands::{parse_tui_command, TuiCommand, McpSubcommand};
 use crate::event::bus_to_app_message;
 use crate::state::{AppMessage, ChatState, InputState, ScrollState};
 use crate::theme::Theme;
@@ -1153,6 +1153,7 @@ pub async fn run_app(
     working_dir: &str,
     debug_flag: Arc<AtomicBool>,
     sandbox_toggle: Arc<AtomicBool>,
+    mcp_manager: Option<std::sync::Arc<gladiator_tools::McpManager>>,
 ) -> io::Result<()> {
     let theme = Theme::default_dark();
     let mut app = App::new(theme);
@@ -1345,6 +1346,47 @@ pub async fn run_app(
                                                 "Sandbox disabled — bash commands run without sandboxing",
                                             ));
                                             app.set_status("Sandbox: OFF");
+                                        }
+                                        app.scroll_mut().scroll_to_bottom();
+                                    }
+                                    TuiCommand::Mcp(sub) => {
+                                        match &sub {
+                                            McpSubcommand::Status => {
+                                                if let Some(ref mgr) = mcp_manager {
+                                                    let status_text = mgr.format_status(None).await;
+                                                    for line in status_text.lines() {
+                                                        app.chat_mut().add_message(AppMessage::system(line));
+                                                    }
+                                                } else {
+                                                    app.chat_mut().add_message(AppMessage::system(
+                        "MCP manager not available (no MCP servers configured)"
+                                                    ));
+                                                }
+                                            }
+                                            McpSubcommand::Restart(name) => {
+                                                if let Some(ref mgr) = mcp_manager {
+                                                    match mgr.restart_server(name).await {
+                                                        Ok(msg) => app.chat_mut().add_message(AppMessage::system(&msg)),
+                                                        Err(e) => app.chat_mut().add_message(AppMessage::error(&e)),
+                                                    }
+                                                } else {
+                                                    app.chat_mut().add_message(AppMessage::error(
+                        "MCP manager not available"
+                                                    ));
+                                                }
+                                            }
+                                            McpSubcommand::Disable(name) => {
+                                                if let Some(ref mgr) = mcp_manager {
+                                                    match mgr.disable_server(name).await {
+                                                        Ok(msg) => app.chat_mut().add_message(AppMessage::system(&msg)),
+                                                        Err(e) => app.chat_mut().add_message(AppMessage::error(&e)),
+                                                    }
+                                                } else {
+                                                    app.chat_mut().add_message(AppMessage::error(
+                        "MCP manager not available"
+                                                    ));
+                                                }
+                                            }
                                         }
                                         app.scroll_mut().scroll_to_bottom();
                                     }

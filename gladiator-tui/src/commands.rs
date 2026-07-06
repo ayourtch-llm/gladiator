@@ -8,6 +8,19 @@ pub enum TuiCommand {
     Fixme(String),
     Debug(bool),
     Sandbox(bool),
+    /// /mcp [status|restart <name>|disable <name>] — show or manage MCP servers.
+    Mcp(McpSubcommand),
+}
+
+/// Subcommands for the `/mcp` slash command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpSubcommand {
+    /// Show status of all MCP servers (default).
+    Status,
+    /// Restart a named server: /mcp restart <name>
+    Restart(String),
+    /// Disable a named server: /mcp disable <name>
+    Disable(String),
 }
 
 /// Parse a user input string for TUI commands.
@@ -38,6 +51,28 @@ pub fn parse_tui_command(text: &str) -> Option<TuiCommand> {
         return Some(TuiCommand::Sandbox(true));
     } else if trimmed == "/sandbox off" {
         return Some(TuiCommand::Sandbox(false));
+    } else if let Some(rest) = trimmed.strip_prefix("/mcp") {
+        // /mcp            → status (all servers)
+        // /mcp status     → same
+        // /mcp restart <name>
+        // /mcp disable <name>
+        return match rest.trim() {
+            "" | "status" => Some(TuiCommand::Mcp(McpSubcommand::Status)),
+            other if other.starts_with("restart ") => {
+                let name = other["restart ".len()..].trim();
+                if !name.is_empty() { return Some(TuiCommand::Mcp(McpSubcommand::Restart(name.to_string()))); }
+                None
+            },
+            other if other.starts_with("disable ") => {
+                let name = other["disable ".len()..].trim();
+                if !name.is_empty() { return Some(TuiCommand::Mcp(McpSubcommand::Disable(name.to_string()))); }
+                None
+            },
+            _ => None,
+        };
+    } else if trimmed == "/help" || trimmed == "/?" {
+        // Not a TUI command — let it pass to the agent as text.
+        return None;
     }
     None
 }
@@ -156,5 +191,45 @@ mod tests {
     #[test]
     fn parse_sandbox_off() {
         assert_eq!(parse_tui_command("/sandbox off"), Some(TuiCommand::Sandbox(false)));
+    }
+
+    #[test]
+    fn parse_mcp_status_default() {
+        assert_eq!(
+            parse_tui_command("/mcp"),
+            Some(TuiCommand::Mcp(McpSubcommand::Status))
+        );
+        assert_eq!(
+            parse_tui_command("/mcp status"),
+            Some(TuiCommand::Mcp(McpSubcommand::Status))
+        );
+    }
+
+    #[test]
+    fn parse_mcp_restart() {
+        assert_eq!(
+            parse_tui_command("/mcp restart mcp-rlsp"),
+            Some(TuiCommand::Mcp(McpSubcommand::Restart("mcp-rlsp".to_string())))
+        );
+    }
+
+    #[test]
+    fn parse_mcp_disable() {
+        assert_eq!(
+            parse_tui_command("/mcp disable mcp-random"),
+            Some(TuiCommand::Mcp(McpSubcommand::Disable("mcp-random".to_string())))
+        );
+    }
+
+    #[test]
+    fn parse_mcp_no_arg_after_restart() {
+        assert_eq!(parse_tui_command("/mcp restart"), None);
+        assert_eq!(parse_tui_command("/mcp restart "), None);
+    }
+
+    #[test]
+    fn parse_mcp_unknown_subcommand() {
+        assert_eq!(parse_tui_command("/mcp foo"), None);
+        assert_eq!(parse_tui_command("/mcp status extra"), None);
     }
 }

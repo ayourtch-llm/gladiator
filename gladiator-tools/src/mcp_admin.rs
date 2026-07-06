@@ -97,6 +97,10 @@ impl McpServerState {
         }
     }
 
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
     pub async fn status(&self) -> ServerStatus {
         self.status.lock().await.clone()
     }
@@ -110,10 +114,83 @@ impl McpServerState {
 /// Manager owning all MCP server states. Exposes admin tools and spawns
 /// supervisor tasks that keep servers alive with exponential backoff.
 pub struct McpManager {
-    servers: Vec<Arc<McpServerState>>,
+    pub(crate) servers: Vec<Arc<McpServerState>>,
 }
 
 impl McpManager {
+    /// Return formatted status text for all (or one named) MCP server(s).
+    /// This is the same logic as McpStatusTool::execute but callable directly
+    /// from the TUI without going through the tool system.
+    pub async fn format_status(&self, filter: Option<&str>) -> String {
+        let mut out = String::new();
+        for state in self.servers.iter() {
+            if let Some(f) = filter { if f != state.name { continue; } }
+            let status = state.status().await;
+            let retries = *state.retry_count.lock().await;
+            out.push_str(&format!(
+                "- {} [{}], retries={}\n",
+                state.name, status, retries,
+            ));
+        }
+        if filter.is_some() {
+            let target = self.servers.iter().find(|s| s.name == filter.unwrap());
+            if let Some(t) = target {
+                out.push_str("\nRecent stderr logs:\n");
+                for line in t.log_ring.tail(20).await { out.push_str(&line); out.push('\n'); }
+            } else {
+                out.push_str(&format!("\nNo server named '{}'\n", filter.unwrap()));
+            }
+        } else {
+            // Brief last-line per server.
+            for state in self.servers.iter() {
+                if let Some(last) = state.log_ring.tail(1).await.first() {
+                    out.push_str(&format!("  last log: {}\n", last));
+                }
+            }
+        }
+        out
+    }
+
+    /// Force-restart a named MCP server. Returns Ok with a status message.
+    pub async fn restart_server(&self, name: &str) -> Result<String, String> {
+        let state = self.servers.iter().find(|s| s.name == name)
+            .ok_or_else(|| format!("no MCP server named '{}'", name))?;
+
+        *state.peer_slot.lock().await = None;
+        *state.status.lock().await = ServerStatus::Restarting { attempt: 1 };
+        *state.retry_count.lock().await = 0;
+
+        let runner = McpSpawnRunner {
+            name: state.name.clone(),
+            config: state.config.clone(),
+        };
+        match runner.spawn_with_log(&state.peer_slot, state.log_ring.clone(), Arc::clone(&state.status)).await {
+            Ok(_tools) => {
+                *state.status.lock().await = ServerStatus::Running;
+                info!("MCP server '{}' manually restarted", name);
+                Ok(format!("Restarted MCP server '{}'", name))
+            }
+            Err(e) => {
+                *state.status.lock().await = ServerStatus::Crashed;
+                state.log_ring.push(format!("[manual-restart-failure] {}", e)).await;
+                Err(format!("Failed to restart '{}': {}", name, e))
+            }
+        }
+    }
+
+    /// Disable a named MCP server.
+    pub async fn disable_server(&self, name: &str) -> Result<String, String> {
+        let state = self.servers.iter().find(|s| s.name == name)
+            .ok_or_else(|| format!("no MCP server named '{}'", name))?;
+
+        *state.peer_slot.lock().await = None;
+        *state.status.lock().await = ServerStatus::Disabled {
+            reason: "disabled via /mcp command".to_string(),
+        };
+        info!("MCP server '{}' disabled", name);
+        Ok(format!("Disabled MCP server '{}'", name))
+    }
+
     /// Spawn every configured MCP server, returning a manager handle plus the
     /// tool actors for all successfully-started servers' tools.
     pub async fn spawn_all(

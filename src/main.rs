@@ -246,7 +246,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing::info!("Built-in tools registered: {} tools", registry.len());
 
     // Spawn MCP tool servers and add their tools to the registry
-    let _manager = spawn_mcp_servers(&bus, &config, &mut registry).await;
+    let mcp_manager = spawn_mcp_servers(&bus, &config, &mut registry).await;
     tracing::info!("Tool registry (with MCP): {} tools", registry.len());
 
     // Create and spawn LLM actor
@@ -374,7 +374,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         });
 
         // Run TUI app
-        match gladiator_tui::app::run_app(bus.clone(), user_input_tx, &config.topics, &config.agent.working_dir, debug_flag.clone(), sandbox_toggle.clone()).await {
+        match gladiator_tui::app::run_app(bus.clone(), user_input_tx, &config.topics, &config.agent.working_dir, debug_flag.clone(), sandbox_toggle.clone(), Some(mcp_manager.clone())).await {
             Ok(()) => {}
             Err(e) => tracing::error!("TUI error: {}", e),
         }
