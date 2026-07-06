@@ -276,6 +276,12 @@ impl AgentActor {
         reason: &str,
         partial: String,
     ) {
+        // The conversation's original purpose: its first user message. Inside
+        // a subagent this is the exact task text injected by call_subagent.
+        // Anchoring the triage on it keeps the recovery guidance within the
+        // original mandate (e.g. a study-and-report task must not be nudged
+        // into implementing changes).
+        let original_goal;
         {
             let mut s = state.lock().await;
             s.inference_in_flight = false;
@@ -283,6 +289,12 @@ impl AgentActor {
             if !partial.is_empty() {
                 s.add_assistant_message(partial.clone());
             }
+            original_goal = s
+                .messages
+                .iter()
+                .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+                .and_then(|m| m.get("content").and_then(|c| c.as_str()))
+                .map(|c| c.chars().take(1500).collect::<String>());
             // Record a surprise for five-whys analysis on context refresh.
             let kind = if reason.contains("idle") { "idle_timeout" } else { "within_stream_loop" };
             s.record_surprise(
@@ -300,15 +312,28 @@ impl AgentActor {
         let _ = bus.publish(&self.id(), warn).await;
 
         if let Some(ref llm_cfg) = self.llm_config {
+            let goal_block = match original_goal {
+                Some(ref g) if !g.trim().is_empty() => format!(
+                    "The ORIGINAL TASK given to the agent for this conversation was:\n\
+                     \"\"\"\n{}\n\"\"\"\n\n",
+                    g
+                ),
+                _ => String::new(),
+            };
             let triage_prompt = format!(
                 "The coding agent's LLM appeared stuck ({reason}) and was interrupted.\n\n\
+                 {goal_block}\
                  Here is the accumulated output/reasoning that was repeating (truncated):\n\
                  \"\"\"\n{partial}\n\"\"\"\n\n\
                  The model was going in circles. Identify what it was stuck on, then state the \
                  SINGLE most concrete next action it should take to make progress. \
                  Be specific: name the file, the function, the exact change. \
+                 The action MUST stay within the scope of the original task: if the task was \
+                 only to study/analyze/report, propose how to finish the report — do NOT \
+                 propose implementing changes. \
                  Answer in 2-3 sentences max.",
                 reason = reason,
+                goal_block = goal_block,
                 partial = partial.chars().take(4000).collect::<String>(),
             );
             match gladiator_llm::llm_call(llm_cfg, &triage_prompt).await {
@@ -323,7 +348,10 @@ impl AgentActor {
                     let inject = format!(
                         "The model was stuck ({reason}) and has been interrupted. \
                          Triage guidance: {guidance}\n\n\
-                         Please continue based on this guidance. Do NOT repeat your previous reasoning.",
+                         Please continue based on this guidance, staying within the scope of \
+                         your ORIGINAL task (do not expand it — e.g. if the task was to study \
+                         and report, finish the report; do not implement changes). \
+                         Do NOT repeat your previous reasoning.",
                         reason = reason,
                         guidance = guidance.trim(),
                     );
