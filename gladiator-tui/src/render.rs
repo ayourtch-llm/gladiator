@@ -261,11 +261,20 @@ impl Renderer {
             AppMessageRole::System => ("[sys]", self.theme.color_text_muted(), self.theme.color_text_muted()),
         };
 
-        let prefix_str = if !prefix.is_empty() {
+        // Subagent indentation: prepend "| " per depth level so nested output
+        // is visually indented in the chat window.
+        let indent_str = if msg.depth > 0 {
+            "| ".repeat(msg.depth)
+        } else {
+            String::new()
+        };
+        let role_prefix = if !prefix.is_empty() {
             format!("{} ", prefix)
         } else {
             String::new()
         };
+        // The full first-line prefix is indent + role prefix (e.g. "|| [tool]").
+        let prefix_str = format!("{}{}", indent_str, role_prefix);
         let prefix_len = prefix_str.chars().count();
 
         // Tool messages: no wrapping, preserve exact whitespace, apply h_offset

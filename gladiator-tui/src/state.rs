@@ -40,50 +40,60 @@ pub struct AppMessage {
     /// time. Used by render.rs to pick rendering strategy without string-
     /// matching on content. None for non-tool messages or when unknown.
     pub tool_kind: Option<ToolKind>,
+    /// Subagent indentation depth (0 = top-level agent). When > 0, the renderer
+    /// prefixes each line with "| ".repeat(depth) so nested subagent output is
+    /// visually indented in the chat window. Populated from bus message meta.
+    pub depth: usize,
 }
 
 impl AppMessage {
     pub fn user(content: impl Into<String>) -> Self {
-        Self { role: AppMessageRole::User, content: content.into(), tool_id: None, tool_name: None, tool_kind: None }
+        Self { role: AppMessageRole::User, content: content.into(), tool_id: None, tool_name: None, tool_kind: None, depth: 0 }
     }
 
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self { role: AppMessageRole::Assistant, content: content.into(), tool_id: None, tool_name: None, tool_kind: None }
+        Self { role: AppMessageRole::Assistant, content: content.into(), tool_id: None, tool_name: None, tool_kind: None, depth: 0 }
     }
 
     pub fn thinking(content: impl Into<String>) -> Self {
-        Self { role: AppMessageRole::Thinking, content: content.into(), tool_id: None, tool_name: None, tool_kind: None }
+        Self { role: AppMessageRole::Thinking, content: content.into(), tool_id: None, tool_name: None, tool_kind: None, depth: 0 }
     }
 
     /// Construct a Tool-role message tagged with `tool_id` for cross-message
     /// matching. The display content is built by the caller.
     pub fn tool(content: impl Into<String>, tool_id: Option<String>) -> Self {
-        Self { role: AppMessageRole::Tool, content: content.into(), tool_id, tool_name: None, tool_kind: None }
+        Self { role: AppMessageRole::Tool, content: content.into(), tool_id, tool_name: None, tool_kind: None, depth: 0 }
     }
 
     /// Construct a Tool-role message with structured metadata for rendering.
     /// `tool_name` is the LSP function name (e.g. "edit_file", "bash").
     pub fn tool_with_meta(content: impl Into<String>, tool_id: Option<String>, tool_name: Option<&str>) -> Self {
         let kind = tool_name.map(classify_tool);
-        Self { role: AppMessageRole::Tool, content: content.into(), tool_id, tool_name: tool_name.map(|s| s.to_string()), tool_kind: kind }
+        Self { role: AppMessageRole::Tool, content: content.into(), tool_id, tool_name: tool_name.map(|s| s.to_string()), tool_kind: kind, depth: 0 }
     }
 
     #[allow(dead_code)]
     pub fn tool_call(tool_name: &str, args: &str, result: &str) -> Self {
         let kind = classify_tool(tool_name);
-        Self { role: AppMessageRole::Tool, content: format!("[{}] {} => {}", tool_name, args, result), tool_id: None, tool_name: Some(tool_name.to_string()), tool_kind: Some(kind) }
+        Self { role: AppMessageRole::Tool, content: format!("[{}] {} => {}", tool_name, args, result), tool_id: None, tool_name: Some(tool_name.to_string()), tool_kind: Some(kind), depth: 0 }
     }
 
     pub fn error(content: impl Into<String>) -> Self {
-        Self { role: AppMessageRole::Error, content: content.into(), tool_id: None, tool_name: None, tool_kind: None }
+        Self { role: AppMessageRole::Error, content: content.into(), tool_id: None, tool_name: None, tool_kind: None, depth: 0 }
     }
 
     pub fn info(content: impl Into<String>) -> Self {
-        Self { role: AppMessageRole::Info, content: content.into(), tool_id: None, tool_name: None, tool_kind: None }
+        Self { role: AppMessageRole::Info, content: content.into(), tool_id: None, tool_name: None, tool_kind: None, depth: 0 }
     }
 
     pub fn system(content: impl Into<String>) -> Self {
-        Self { role: AppMessageRole::System, content: content.into(), tool_id: None, tool_name: None, tool_kind: None }
+        Self { role: AppMessageRole::System, content: content.into(), tool_id: None, tool_name: None, tool_kind: None, depth: 0 }
+    }
+
+    /// Set the subagent indentation depth on this message (builder pattern).
+    pub fn with_depth(mut self, depth: usize) -> Self {
+        self.depth = depth;
+        self
     }
 }
 

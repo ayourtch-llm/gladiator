@@ -172,6 +172,21 @@ impl AgentActor {
         self
     }
 
+    /// Stamp a message with the current subagent depth (from ConversationState)
+    /// so the TUI can indent nested output. No-op when at top level (depth 0).
+    async fn stamp_depth(
+        &self,
+        msg: Message,
+        state: &Arc<Mutex<ConversationState>>,
+    ) -> Message {
+        let depth = state.lock().await.subagent_depth;
+        if depth > 0 {
+            msg.with_depth(depth)
+        } else {
+            msg
+        }
+    }
+
     /// Cross-turn loop breaker: when the agent detects that consecutive turns
     /// are near-identical, it (1) collapses the duplicate turns from history
     /// to remove the attractor, then (2) injects a tie-breaker message with a
@@ -349,6 +364,7 @@ impl AgentActor {
                     m.clone(),
                 )
                 .with_type("UserMessageDisplayed");
+                let displayed_msg = self.stamp_depth(displayed_msg, state).await;
                 let _ = bus.publish(&self.id(), displayed_msg).await;
             }
         }
@@ -380,11 +396,15 @@ impl AgentActor {
                     "Agent {}: subagent hit max_iterations ({}), popping with partial result",
                     self.index, self.max_iterations
                 );
+                let depth_for_warn = {
+                    let s = state.lock().await;
+                    s.subagent_depth
+                };
                 let _ = bus.publish(&self.id(), Message::new(
                     &self.stream_output_topic,
                     &self.id(),
-                    format!("| [subagent] reached max iterations ({}) — returning partial", self.max_iterations),
-                ).with_type("Warning")).await;
+                    format!("[subagent] reached max iterations ({}) — returning partial", self.max_iterations),
+                ).with_type("Warning").with_depth(depth_for_warn)).await;
                 Box::pin(self.pop_subagent(state, subagent_stack, bus, last_output)).await;
                 return;
             }
@@ -718,12 +738,17 @@ impl AgentActor {
             subagent_stack.lock().await.len()
         );
 
+        let depth_for_start = {
+            let s = state.lock().await;
+            s.subagent_depth
+        };
         let indent_msg = Message::new(
             &self.stream_output_topic,
             &self.id(),
-            format!("| [subagent] starting: {}", task),
+            format!("[subagent] starting: {}", task),
         )
-        .with_type("SubagentStart");
+        .with_type("SubagentStart")
+        .with_depth(depth_for_start);
         let _ = bus.publish(&self.id(), indent_msg).await;
 
         // Inject the task as a fresh user message. advance_turn_if_resolved
@@ -811,12 +836,16 @@ impl AgentActor {
             result_text.len()
         );
 
+        // depth_after is the parent's depth (0 for top-level). The completed
+        // message belongs to the inner level that just finished, so stamp with
+        // depth_after + 1.
         let indent_msg = Message::new(
             &self.stream_output_topic,
             &self.id(),
-            format!("| [subagent] completed: {}", result_text.chars().take(200).collect::<String>()),
+            format!("[subagent] completed: {}", result_text.chars().take(200).collect::<String>()),
         )
-        .with_type("SubagentEnd");
+        .with_type("SubagentEnd")
+        .with_depth(depth_after + 1);
         let _ = bus.publish(&self.id(), indent_msg).await;
 
         // advance_turn_if_resolved will send the restored parent conversation
@@ -1117,6 +1146,13 @@ impl Actor for AgentActor {
                             debug!("Agent {} forwarding stream ({}) to {}: {}", self.index, msg_type, self.stream_output_topic, preview);
                             let mut forwarded = msg.clone();
                             forwarded.topic = self.stream_output_topic.clone();
+                            // Stamp subagent depth so the TUI can indent nested output.
+                            {
+                                let s = state.lock().await;
+                                if s.subagent_depth > 0 {
+                                    forwarded = forwarded.with_depth(s.subagent_depth);
+                                }
+                            }
                             let _ = bus.publish(&self.id(), forwarded).await;
                         }
                         Err(RecvError::Lagged(n)) => warn!("Agent {} stream lagged: {}", self.index, n),
@@ -1191,6 +1227,7 @@ impl Actor for AgentActor {
                                             "text": format!("Calling tool: {}({})", func_name, func_args_str),
                                         }),
                                     ).with_type("Info");
+                                    let tool_status = self.stamp_depth(tool_status, &state).await;
                                     let _ = bus.publish(&self.id(), tool_status).await;
 
                                     let outcome =
@@ -1228,6 +1265,7 @@ impl Actor for AgentActor {
                                             display_snapshot,
                                         ),
                                     ).with_type("LlmToolResult");
+                                    let stream_msg = self.stamp_depth(stream_msg, &state).await;
                                     let _ = bus.publish(&self.id(), stream_msg).await;
 
                                     self.advance_turn_if_resolved(bus, &state, &subagent_stack).await;
@@ -1249,6 +1287,7 @@ impl Actor for AgentActor {
                                         "text": format!("Calling tool: {}({})", func_name, func_args_str),
                                     }),
                                 ).with_type("Info");
+                                let tool_status = self.stamp_depth(tool_status, &state).await;
                                 let _ = bus.publish(&self.id(), tool_status).await;
 
                                 let exec_payload = serde_json::json!({
@@ -1306,6 +1345,7 @@ impl Actor for AgentActor {
                                     result_text
                                 ),
                             ).with_type("LlmToolResult");
+                            let stream_msg = self.stamp_depth(stream_msg, &state).await;
                             let _ = bus.publish(&self.id(), stream_msg).await;
 
                             self.advance_turn_if_resolved(bus, &state, &subagent_stack).await;

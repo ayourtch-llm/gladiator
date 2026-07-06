@@ -115,6 +115,24 @@ impl Message {
         self.meta.get("type").and_then(|t| t.as_str())
     }
 
+    /// Set the subagent indentation depth on this message's metadata.
+    /// Used by the agent actor to mark messages emitted during nested
+    /// call_subagent execution so the TUI can prefix lines with "| ".
+    pub fn with_depth(mut self, depth: usize) -> Self {
+        if !self.meta.is_object() {
+            self.meta = serde_json::json!({});
+        }
+        if let serde_json::Value::Object(ref mut obj) = self.meta {
+            obj.insert("depth".to_string(), serde_json::json!(depth));
+        }
+        self
+    }
+
+    /// Retrieve the subagent indentation depth from metadata, or 0 (top-level).
+    pub fn meta_depth(&self) -> usize {
+        self.meta.get("depth").and_then(|d| d.as_u64()).unwrap_or(0) as usize
+    }
+
     pub fn stream_id(&self) -> Option<String> {
         self.meta.get("stream_id").and_then(|s| s.as_str()).map(|s| s.to_string())
     }

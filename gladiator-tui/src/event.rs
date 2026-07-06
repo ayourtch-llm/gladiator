@@ -6,8 +6,10 @@ use gladiator_core::message::Message;
 pub fn bus_to_app_message(msg: &Message) -> Option<AppMessage> {
     let msg_type = msg.meta_type();
     let content = msg.payload_str().unwrap_or_default();
+    // Read subagent indentation depth from metadata (0 when at top level).
+    let depth = msg.meta_depth();
 
-    match msg_type {
+    let result: Option<AppMessage> = match msg_type {
         Some(t) => match t {
             "UserInput" => Some(AppMessage::user(content)),
             "LlmStream" | "LlmThinking" | "LlmDump" => {
@@ -79,11 +81,12 @@ pub fn bus_to_app_message(msg: &Message) -> Option<AppMessage> {
                 tool_id: None,
                 tool_name: None,
                 tool_kind: None,
+                depth,
             }),
             "Info" => {
                 // Support both legacy plain-text and structured JSON payloads.
                 if let Some(text) = content.strip_prefix("Calling tool:") {
-                    return Some(AppMessage::info(format!("Calling tool: {}", text.trim())));
+                    return Some(AppMessage::info(format!("Calling tool: {}", text.trim())).with_depth(depth));
                 }
                 // Structured form: {"id": ..., "name": ..., "text": "..."}
                 if msg.payload.is_object() {
@@ -125,7 +128,14 @@ pub fn bus_to_app_message(msg: &Message) -> Option<AppMessage> {
             _ => None,
         },
         None => None,
-    }
+    };
+    result.map(|m| {
+        if m.depth == 0 && depth > 0 {
+            m.with_depth(depth)
+        } else {
+            m
+        }
+    })
 }
 
 /// Parse the tool_call_id from an LlmToolResult display string of the form:

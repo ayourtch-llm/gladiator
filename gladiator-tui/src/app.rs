@@ -560,6 +560,8 @@ impl App {
 
     pub fn handle_bus_message(&mut self, msg: &Message) {
         let msg_type = msg.meta_type().unwrap_or_default().to_string();
+        // Read subagent indentation depth from metadata (0 when at top level).
+        let depth = msg.meta_depth();
 
         // Spinner busy tracking:
         //   LlmRequestSent → busy + prefill (Thinking... before any tokens)
@@ -744,9 +746,9 @@ impl App {
                     }
                 }
                 if is_thinking {
-                    self.chat.add_message(AppMessage::thinking(&payload));
+                    self.chat.add_message(AppMessage::thinking(&payload).with_depth(depth));
                 } else {
-                    self.chat.add_message(AppMessage::assistant(&payload));
+                    self.chat.add_message(AppMessage::assistant(&payload).with_depth(depth));
                 }
                 self.last_stream_type = Some(msg_type);
             }
@@ -820,7 +822,9 @@ impl App {
                 }
             }
             // New tool call — add a new Tool message tagged with the id and meta.
-            self.chat.add_message(AppMessage::tool_with_meta(content, tool_id.clone(), if !name.is_empty() { Some(name) } else { None }));
+            let mut app_msg = AppMessage::tool_with_meta(content, tool_id.clone(), if !name.is_empty() { Some(name) } else { None });
+            app_msg.depth = depth;
+            self.chat.add_message(app_msg);
             self.last_stream_type = None;
             return;
         }
