@@ -254,7 +254,8 @@ pub struct LlmConfig {
     #[serde(default = "default_loop_cycle_window")]
     pub loop_cycle_window: usize,
     /// Loop-detector hard cap in chars. Streaming is broken unconditionally
-    /// once this many chars have been emitted in a single response. Default 20000.
+    /// once this many chars have been emitted in a single response. Default 80000
+    /// (~20k tokens) — high enough that legitimate long outputs don't hit it.
     #[serde(default = "default_loop_max_total_chars")]
     pub loop_max_total_chars: usize,
 }
@@ -311,7 +312,7 @@ fn default_loop_cycle_window() -> usize {
 }
 
 fn default_loop_max_total_chars() -> usize {
-    20000
+    80000
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

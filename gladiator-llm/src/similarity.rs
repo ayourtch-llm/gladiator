@@ -12,6 +12,15 @@
 //!    a loop. Inactive until `min_total_chars` have been fed (avoids false
 //!    positives during legitimate long technical reasoning).
 //!
+//!    Similarity alone is not enough: legitimate long output about a single
+//!    topic (one file, one design question) reuses the same vocabulary in
+//!    every window and scores "similar" while still making progress. The
+//!    discriminator is **vocabulary novelty** — a genuinely looping model
+//!    stops introducing new words, while real work keeps producing new
+//!    identifiers, paths, and values. A similar window only counts toward the
+//!    streak when the fraction of never-seen-before words in it falls below
+//!    `novelty_threshold`; otherwise the streak resets.
+//!
 //! 2. **Hard cap**: break unconditionally after `max_total_chars` regardless
 //!    of similarity. A simple backstop for cases the similarity check misses.
 //!
@@ -112,8 +121,11 @@ pub enum LoopReason {
 ///
 /// The detector buffers recent output and, once `min_total_chars` have been
 /// fed, compares the last `cycle_window` chars against the `cycle_window`
-/// chars preceding them using `keyword_similarity` (paraphrase-resistant).
-/// After `cycle_streak_limit` consecutive similar comparisons, it fires with
+/// chars preceding them using keyword Jaccard (paraphrase-resistant). A
+/// similar window only counts toward the streak when it introduces almost no
+/// new vocabulary (see `novelty_threshold`) — similar-but-novel windows are
+/// focused work, not a loop, and reset the streak. After
+/// `cycle_streak_limit` consecutive stuck comparisons, it fires with
 /// [`LoopReason::CycleDetected`]. Independently, once `max_total_chars` have
 /// been fed, it fires with [`LoopReason::HardCapHit`].
 #[derive(Debug, Clone)]
@@ -123,6 +135,10 @@ pub struct LoopDetector {
     pub cycle_streak: usize,
     pub cycle_streak_limit: usize,
     pub cycle_threshold: f64,
+    /// Minimum fraction of never-seen-before significant words in the recent
+    /// window for it to count as "making progress". At or above this rate the
+    /// streak resets even when the window is similar to the previous one.
+    pub novelty_threshold: f64,
     pub min_total_chars: usize,
     pub max_total_chars: usize,
     pub last_check_fed: usize,
@@ -130,6 +146,9 @@ pub struct LoopDetector {
     pub fed_chars: usize,
     /// Last reason the detector fired (None if it hasn't).
     pub last_reason: Option<LoopReason>,
+    /// All significant words observed in checked windows so far. Used to
+    /// measure vocabulary novelty; bounded by the response's vocabulary.
+    pub seen_words: HashSet<String>,
 }
 
 impl LoopDetector {
@@ -138,13 +157,15 @@ impl LoopDetector {
             buffer: String::new(),
             cycle_window: 5_000,
             cycle_streak: 0,
-            cycle_streak_limit: 2,
+            cycle_streak_limit: 3,
             cycle_threshold: 0.55,
+            novelty_threshold: 0.05,
             min_total_chars: 10_000,
-            max_total_chars: 20_000,
+            max_total_chars: 80_000,
             last_check_fed: 0,
             fed_chars: 0,
             last_reason: None,
+            seen_words: HashSet::new(),
         }
     }
 
@@ -189,13 +210,42 @@ impl LoopDetector {
         let earlier: String = chars[n - 2 * self.cycle_window..n - self.cycle_window]
             .iter()
             .collect();
-        let sim = keyword_similarity(&earlier, &recent);
+        let earlier_words = significant_words(&earlier);
+        let recent_words = significant_words(&recent);
 
-        if sim >= self.cycle_threshold {
+        // Keyword Jaccard between the two windows (paraphrase-resistant).
+        let sim = if earlier_words.is_empty() && recent_words.is_empty() {
+            1.0
+        } else if earlier_words.is_empty() || recent_words.is_empty() {
+            0.0
+        } else {
+            let inter = earlier_words.intersection(&recent_words).count() as f64;
+            let union = earlier_words.union(&recent_words).count() as f64;
+            inter / union
+        };
+
+        // Vocabulary novelty: fraction of the recent window's words never seen
+        // in any previously checked window. The earlier window chronologically
+        // precedes the recent one, so fold it into `seen_words` first —
+        // otherwise the very first check would count everything as novel.
+        for w in earlier_words {
+            self.seen_words.insert(w);
+        }
+        let novel = recent_words
+            .iter()
+            .filter(|w| !self.seen_words.contains(*w))
+            .count();
+        let novelty = novel as f64 / recent_words.len().max(1) as f64;
+        for w in recent_words {
+            self.seen_words.insert(w);
+        }
+
+        if sim >= self.cycle_threshold && novelty < self.novelty_threshold {
             self.cycle_streak += 1;
             tracing::debug!(
-                "[loop-detector] similar cycle window (kw-ratio={:.3}, streak={}/{}, {} chars fed)",
+                "[loop-detector] stuck cycle window (kw-ratio={:.3}, novelty={:.3}, streak={}/{}, {} chars fed)",
                 sim,
+                novelty,
                 self.cycle_streak,
                 self.cycle_streak_limit,
                 self.fed_chars
@@ -203,10 +253,11 @@ impl LoopDetector {
             if self.cycle_streak >= self.cycle_streak_limit {
                 self.last_reason = Some(LoopReason::CycleDetected);
                 tracing::info!(
-                    "[loop-detector] cycle detected: {} consecutive similar windows \
-                     (last kw-ratio={:.3}, {} chars fed)",
+                    "[loop-detector] cycle detected: {} consecutive similar low-novelty windows \
+                     (last kw-ratio={:.3}, novelty={:.3}, {} chars fed)",
                     self.cycle_streak,
                     sim,
+                    novelty,
                     self.fed_chars
                 );
                 return self.last_fired();
@@ -214,9 +265,11 @@ impl LoopDetector {
         } else {
             if self.cycle_streak > 0 {
                 tracing::debug!(
-                    "[loop-detector] resetting streak ({}) on dissimilar window (kw-ratio={:.3})",
+                    "[loop-detector] resetting streak ({}) — window is {} (kw-ratio={:.3}, novelty={:.3})",
                     self.cycle_streak,
-                    sim
+                    if sim >= self.cycle_threshold { "similar but novel" } else { "dissimilar" },
+                    sim,
+                    novelty
                 );
             }
             self.cycle_streak = 0;
@@ -350,6 +403,33 @@ mod tests {
         }
         assert_eq!(fired, Some(LoopReason::HardCapHit));
         assert!(d.fed_chars >= 2000);
+    }
+
+    #[test]
+    fn detector_does_not_fire_on_focused_progressing_output() {
+        // Legit long output about a single topic: every window shares the
+        // same framing vocabulary (high keyword similarity), but each chunk
+        // introduces new identifiers/values — real progress, not a loop.
+        // Before the novelty gate this pattern was a false positive.
+        let mut d = small_detector();
+        d.max_total_chars = 1_000_000; // isolate the cycle check from the cap
+        for i in 0..120 {
+            let chunk = format!(
+                "Next the resolver maps shard token shard_{i:04}_alpha into \
+                 partition slot_{p}_beta and writes checkpoint marker \
+                 ckpt_{c}_gamma before advancing the cursor offset. ",
+                i = i,
+                p = i * 7 + 13,
+                c = i * 31 + 5,
+            );
+            assert!(
+                d.push(&chunk).is_none(),
+                "fired at chunk {} (streak={}) on progressing output",
+                i,
+                d.cycle_streak
+            );
+        }
+        assert!(d.last_reason.is_none());
     }
 
     #[test]
