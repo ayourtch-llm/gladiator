@@ -597,6 +597,19 @@ impl App {
                 // First token arrives — no longer in prefill.
                 self.is_prefill = false;
             }
+            "LlmToolCall" => {
+                // Tool-call argument deltas arriving: clear prefill so the
+                // status line shows "Working... N chars" instead of staying
+                // stuck on "Thinking..." while args accumulate.
+                if self.is_prefill {
+                    if let Some(start) = self.request_start.take() {
+                        let dur_ms = start.elapsed().as_millis() as u64;
+                        self.pending_prefill_ms = Some(dur_ms);
+                    }
+                }
+                self.is_busy = true;
+                self.is_prefill = false;
+            }
             "LlmStreamEnd" => {
                 self.is_busy = false;
                 self.is_prefill = false;
@@ -756,6 +769,10 @@ impl App {
                 .and_then(|f| f.get("arguments"))
                 .and_then(|a| a.as_str())
                 .unwrap_or("");
+            // Track accumulated tool-call argument chars for status display.
+            // ToolInputDelta sends cumulative text (not incremental chunks),
+            // so assign rather than add to avoid over-counting.
+            self.stream_rx_chars = args.chars().count();
             // Stable matching key: prefer the LLM-provided call id; fall back
             // to an index-based synthetic key.
             let tool_id = msg.payload.get("id")
