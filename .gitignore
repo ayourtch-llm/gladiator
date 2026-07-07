@@ -5,3 +5,4 @@
 .env
 gladiator.log
 fixme.json
+gladiator-tui/tmp/history.json
