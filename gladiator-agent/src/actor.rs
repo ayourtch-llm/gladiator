@@ -241,7 +241,11 @@ impl AgentActor {
         // (2) Tie-breaker injection.
         let inject = format!(
             "You have repeated the same approach {} times across turns and it is not working. \
-             You MUST try a DIFFERENT approach this time — not a minor variation of the same one. \
+             STOP this approach immediately. \
+             Spawn a subagent to investigate the problem from a fresh angle — \
+             use todo_write to plan the investigation, then call_subagent with a focused task. \
+             If the subagent's findings still leave gaps, spawn another subagent for the next layer. \
+             Do NOT continue on the same approach. \
              If you need a tie breaker in choosing a different approach, \
              here is a random number for you: {}. \
              Use it to pick between alternatives you haven't tried yet.",
@@ -351,7 +355,9 @@ impl AgentActor {
                          Please continue based on this guidance, staying within the scope of \
                          your ORIGINAL task (do not expand it — e.g. if the task was to study \
                          and report, finish the report; do not implement changes). \
-                         Do NOT repeat your previous reasoning.",
+                         Do NOT repeat your previous reasoning. \
+                         If the guidance points to a problem you cannot resolve quickly, \
+                         spawn a subagent to investigate — use todo_write to plan, then call_subagent with a focused task.",
                         reason = reason,
                         guidance = guidance.trim(),
                     );
