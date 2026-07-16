@@ -1553,7 +1553,7 @@ impl Actor for AgentActor {
                             }
                             let preview = msg.payload_str().unwrap_or_default();
                             let preview = if preview.chars().count() > 60 { let truncated: String = preview.chars().take(60).collect(); format!("{}...", truncated) } else { preview };
-                            debug!("Agent {} forwarding stream ({}) to {}: {}", self.index, msg_type, self.stream_output_topic, preview);
+                            info!("Agent {} forwarding stream ({}) to {}: len={}, preview={}", self.index, msg_type, self.stream_output_topic, preview.len(), preview);
                             let mut forwarded = msg.clone();
                             forwarded.topic = self.stream_output_topic.clone();
                             // Stamp subagent depth so the TUI can indent nested output.

@@ -186,7 +186,8 @@ impl LlmActor {
                                 match event {
                                     LlmEvent::TextDelta { text, .. } => {
                                         if !text.is_empty() {
-                                            debug!("[llm] text delta: {}", &text[..text.len().min(100)]);
+                                            let preview: String = text.chars().take(80).collect();
+                                            info!("[llm{}] text delta: len={}, preview={}", self.index, text.len(), preview);
                                             rx_chars += text.chars().count();
                                             let chunk_msg = gladiator_core::Message::new(
                                                 &self.stream_topic,
@@ -205,6 +206,8 @@ impl LlmActor {
                                     }
                                     LlmEvent::ReasoningDelta { text, .. } => {
                                         if !text.is_empty() {
+                                            let preview: String = text.chars().take(80).collect();
+                                            info!("[llm{}] reasoning delta: len={}, preview={}", self.index, text.len(), preview);
                                             rx_chars += text.chars().count();
                                             let chunk_msg = gladiator_core::Message::new(
                                                 &self.stream_topic,
