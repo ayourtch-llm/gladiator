@@ -77,7 +77,9 @@ impl HttpTransport {
                     return Ok(response);
                 }
                 Ok(Err(e)) => {
-                    let err_str = e.to_string();
+                    // Include the full source chain: reqwest's Display hides the
+                    // underlying cause (DNS vs connect vs body), Debug shows it.
+                    let err_str = format!("{} ({:?})", e, e);
                     if is_retryable_reqwest_error(&e) && attempt < config.max_retries {
                         tracing::warn!(
                             "Request failed (attempt {}/{}), retrying in {:?}: {}",
