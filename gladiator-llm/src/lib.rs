@@ -11,6 +11,7 @@ pub mod auth;
 pub mod endpoint;
 pub mod provider;
 pub mod tool_stream;
+pub mod tool_call_rescue;
 pub mod args_fixer;
 pub mod model_probe;
 pub mod lifecycle;

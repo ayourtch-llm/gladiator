@@ -141,6 +141,7 @@ impl LlmActor {
         bus: &gladiator_core::Bus,
         stream_id: &str,
         protocol: &dyn Protocol,
+        offered_tools: Option<&[serde_json::Value]>,
         _tool_runtime: &Arc<Mutex<ToolRuntime>>,
     ) -> Result<(String, Vec<serde_json::Value>, StreamSignal), crate::error::LlmError> {
         let mut full_response = String::new();
@@ -361,6 +362,35 @@ impl LlmActor {
         )
         .await;
 
+        // Rescue path: some models emit their native tool-call markup as
+        // literal text (usually inside the reasoning channel) instead of
+        // structured tool_calls, which the server then fails to parse. When
+        // the stream produced no structured calls, scan the accumulated text
+        // for well-formed blocks naming tools we actually offered.
+        if state.tool_calls.is_empty() {
+            if let Some(tools) = offered_tools {
+                let known: std::collections::HashSet<String> = tools
+                    .iter()
+                    .filter_map(|t| t["function"]["name"].as_str().map(|s| s.to_string()))
+                    .collect();
+                let mut rescued = crate::tool_call_rescue::extract_tool_calls(&full_response, &known);
+                if rescued.is_empty() {
+                    rescued = crate::tool_call_rescue::extract_tool_calls(&reasoning_response, &known);
+                }
+                if !rescued.is_empty() {
+                    info!(
+                        "[llm{}] rescued {} tool call(s) emitted as text instead of structured tool_calls",
+                        self.index,
+                        rescued.len()
+                    );
+                    state.tool_calls = rescued;
+                    // The turn now proceeds as a normal tool round-trip; don't
+                    // let a loop/idle signal divert it into triage.
+                    signal = StreamSignal::Normal;
+                }
+            }
+        }
+
         // When the model got stuck in a reasoning loop, the triage path needs
         // to see what was repeated — but full_response only has TextDelta.
         // Merge accumulated reasoning into the payload so the agent's triage
@@ -413,7 +443,7 @@ impl LlmActor {
         match route.send(&canonical, config).await {
             Ok(response) => {
             info!("[llm] request succeeded, streaming response");
-                self.stream_response(response, config, bus, &stream_id, &*route.protocol, &tool_runtime)
+                self.stream_response(response, config, bus, &stream_id, &*route.protocol, tools, &tool_runtime)
                     .await
                     .map_err(|e| {
                         tracing::error!("[llm{}] Stream failed: {}", self.index, e);
